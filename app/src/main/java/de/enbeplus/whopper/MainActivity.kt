@@ -49,6 +49,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
@@ -224,8 +225,13 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
             }
 
             // weight(1f) statt fillMaxSize: der Inhalt bekommt exakt den Rest der Hoehe,
-            // sonst schiebt die Karte die Bedienelemente aus dem Bild.
-            Box(modifier = Modifier.weight(1f)) {
+            // sonst schiebt die Karte die Bedienelemente aus dem Bild. clipToBounds
+            // sorgt zusaetzlich dafuer, dass die Karten-View nichts ausserhalb malt.
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clipToBounds(),
+            ) {
                 if (tab == 0) {
                     SpotList(
                         state = state,
