@@ -1,5 +1,6 @@
 package de.enbeplus.whopper.model
 
+import java.time.LocalDateTime
 import kotlin.math.asin
 import kotlin.math.cos
 import kotlin.math.min
@@ -41,7 +42,13 @@ data class Spot(
     val routeOffsetMeters: Double? = null,
     /** Nur im Routenmodus: gefahrene Strecke ab Start bis zur Abzweigung. */
     val routeProgressMeters: Double? = null,
+    /** Voraussichtliche Ankunft, aus Abfahrtszeit und Fahrzeit bis hierher. */
+    val arrival: LocalDateTime? = null,
+    /** Ob die Filiale zur Ankunftszeit geoeffnet hat. */
+    val openState: OpenState? = null,
 ) {
+    val isClosedOnArrival: Boolean get() = openState is OpenState.Closed
+
     val nearest: ChargerHit get() = chargers.first()
 }
 

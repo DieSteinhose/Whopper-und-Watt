@@ -1,6 +1,7 @@
 package de.enbeplus.whopper
 
 import android.Manifest
+import android.app.TimePickerDialog
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
@@ -61,7 +62,9 @@ import de.enbeplus.whopper.ui.MapScreen
 import de.enbeplus.whopper.ui.MessageBanner
 import de.enbeplus.whopper.ui.SpotList
 import de.enbeplus.whopper.ui.WhopperTheme
+import de.enbeplus.whopper.ui.formatMoment
 import org.osmdroid.config.Configuration
+import java.time.LocalDateTime
 
 class MainActivity : ComponentActivity() {
 
@@ -149,6 +152,21 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
         }
     }
 
+    // Uhrzeit waehlen ueber den Systemdialog: liegt sie vor jetzt, ist morgen gemeint.
+    fun pickDepartureTime() {
+        val now = LocalDateTime.now()
+        TimePickerDialog(
+            context,
+            { _, hour, minute ->
+                val chosen = now.withHour(hour).withMinute(minute).withSecond(0).withNano(0)
+                viewModel.setDeparture(if (chosen.isBefore(now)) chosen.plusDays(1) else chosen)
+            },
+            now.hour,
+            now.minute,
+            true,
+        ).show()
+    }
+
     fun navigateTo(lat: Double, lon: Double, label: String) {
         val uri = Uri.parse("geo:$lat,$lon?q=$lat,$lon(${Uri.encode(label)})")
         try {
@@ -210,6 +228,9 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
                 onCorridor = viewModel::setCorridor,
                 onGap = viewModel::setMaxGap,
                 onOnlyEnbw = viewModel::setOnlyEnbw,
+                onDepartureNow = { viewModel.setDeparture(null) },
+                onDepartureIn = viewModel::setDepartureInHours,
+                onPickTime = ::pickDepartureTime,
             )
 
             if (state.loading) {
@@ -285,6 +306,9 @@ private fun SearchControls(
     onCorridor: (Int) -> Unit,
     onGap: (Int) -> Unit,
     onOnlyEnbw: (Boolean) -> Unit,
+    onDepartureNow: () -> Unit,
+    onDepartureIn: (Long) -> Unit,
+    onPickTime: () -> Unit,
 ) {
     Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -368,6 +392,26 @@ private fun SearchControls(
                     }
                     TextButton(onClick = onOpenPlan) { Text("Plan oeffnen") }
                 }
+            }
+
+            ChipRow(
+                label = state.departureAt?.let {
+                    "Abfahrt ${formatMoment(it, LocalDateTime.now())}"
+                } ?: "Abfahrt jetzt",
+            ) {
+                FilterChip(
+                    selected = state.departureAt == null,
+                    onClick = onDepartureNow,
+                    label = { Text("jetzt") },
+                )
+                listOf(1L, 2L, 4L).forEach { hours ->
+                    FilterChip(
+                        selected = false,
+                        onClick = { onDepartureIn(hours) },
+                        label = { Text("+$hours h") },
+                    )
+                }
+                TextButton(onClick = onPickTime) { Text("Uhrzeit") }
             }
 
             ChipRow(label = "Abstand") {

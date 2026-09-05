@@ -1,10 +1,12 @@
 package de.enbeplus.whopper.data
 
 import de.enbeplus.whopper.model.ChargerHit
+import de.enbeplus.whopper.model.OpeningHours
 import de.enbeplus.whopper.model.Poi
 import de.enbeplus.whopper.model.RouteGeometry
 import de.enbeplus.whopper.model.Spot
 import de.enbeplus.whopper.model.haversineMeters
+import java.time.LocalDateTime
 
 /**
  * Erkennt EnBW-Ladesaeulen anhand der ueblichen OSM-Tags.
@@ -48,6 +50,7 @@ object Pairing {
         origin: Pair<Double, Double>?,
         route: RouteGeometry? = null,
         maxRouteOffsetMeters: Int = Int.MAX_VALUE,
+        departure: LocalDateTime? = null,
     ): List<Spot> {
         val usable = if (onlyEnbw) chargers.filter(EnbwFilter::isEnbw) else chargers
         val spots = burgers.mapNotNull { burger ->
@@ -65,6 +68,10 @@ object Pairing {
             val match = route?.match(burger.lat, burger.lon)
             if (match != null && match.offsetMeters > maxRouteOffsetMeters) return@mapNotNull null
 
+            // Auf der Route zaehlt die Ankunft nach der Fahrzeit bis dorthin,
+            // im Umkreis die gewaehlte Zeit selbst.
+            val arrival = departure?.plusSeconds(match?.travelSeconds?.toLong() ?: 0L)
+
             Spot(
                 burger = burger,
                 chargers = hits,
@@ -73,6 +80,10 @@ object Pairing {
                 },
                 routeOffsetMeters = match?.offsetMeters,
                 routeProgressMeters = match?.progressMeters,
+                arrival = arrival,
+                openState = arrival?.let {
+                    OpeningHours.evaluate(burger.tags["opening_hours"], it)
+                },
             )
         }
         // Auf einer Route zaehlt die Reihenfolge der Fahrt, sonst die Naehe zum Startpunkt.

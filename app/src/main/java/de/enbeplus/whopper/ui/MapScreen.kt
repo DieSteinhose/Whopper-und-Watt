@@ -55,6 +55,7 @@ private fun renderOverlays(map: MapView, state: UiState) {
     map.overlays.clear()
 
     val burgerIcon = ContextCompat.getDrawable(map.context, R.drawable.ic_marker_burger)
+    val closedIcon = ContextCompat.getDrawable(map.context, R.drawable.ic_marker_burger_closed)
     val chargerIcon = ContextCompat.getDrawable(map.context, R.drawable.ic_marker_charger)
 
     state.route?.let { route ->
@@ -71,10 +72,17 @@ private fun renderOverlays(map: MapView, state: UiState) {
         val burgerPoint = GeoPoint(spot.burger.lat, spot.burger.lon)
         val chargerPoint = GeoPoint(spot.nearest.charger.lat, spot.nearest.charger.lon)
 
+        val closed = spot.isClosedOnArrival
+
         map.overlays.add(
             Polyline(map).apply {
                 setPoints(listOf(burgerPoint, chargerPoint))
-                outlinePaint.color = Color.rgb(0x1B, 0x8A, 0x4C)
+                // Geschlossene Filialen bleiben auf der Karte, nur eben blass.
+                outlinePaint.color = if (closed) {
+                    Color.argb(110, 0x8E, 0x8E, 0x93)
+                } else {
+                    Color.rgb(0x1B, 0x8A, 0x4C)
+                }
                 outlinePaint.strokeWidth = 6f
             },
         )
@@ -83,9 +91,14 @@ private fun renderOverlays(map: MapView, state: UiState) {
             Marker(map).apply {
                 position = burgerPoint
                 setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                burgerIcon?.let { icon = it }
+                (if (closed) closedIcon else burgerIcon)?.let { icon = it }
                 title = spot.burger.name ?: "Burger King"
-                snippet = "${formatMeters(spot.nearest.gapMeters)} zur naechsten Ladesaeule"
+                snippet = listOfNotNull(
+                    "${formatMeters(spot.nearest.gapMeters)} zur naechsten Ladesaeule",
+                    spot.arrival?.let { arrival ->
+                        spot.openState?.let { describeOpenState(it, arrival) }
+                    },
+                ).joinToString(" · ")
             },
         )
 

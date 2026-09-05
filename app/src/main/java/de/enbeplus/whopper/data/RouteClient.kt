@@ -35,8 +35,11 @@ class RouteClient {
     ): RouteGeometry = withContext(Dispatchers.IO) {
         require(waypoints.size >= 2) { "Eine Route braucht Start und Ziel" }
         val coordinates = waypoints.joinToString(";") { "${it.lon},${it.lat}" }
+        // annotations=duration liefert die Fahrzeit je Segment, daraus wird spaeter
+        // die voraussichtliche Ankunftszeit an jedem Burger King berechnet.
         val url = "$OSRM_BASE/route/v1/driving/$coordinates" +
-            "?overview=full&geometries=polyline&alternatives=false&steps=false"
+            "?overview=full&geometries=polyline&alternatives=false&steps=false" +
+            "&annotations=duration"
         val request = Request.Builder()
             .url(url)
             .header("User-Agent", OverpassClient.USER_AGENT)
@@ -50,14 +53,38 @@ class RouteClient {
             if (json.optString("code") != "Ok") {
                 throw IOException("Keine Route gefunden (${json.optString("code")})")
             }
-            val geometry = json.optJSONArray("routes")
-                ?.optJSONObject(0)
-                ?.optString("geometry")
-                .orEmpty()
-            val points = decodePolyline(geometry)
+            val best = json.optJSONArray("routes")?.optJSONObject(0)
+                ?: throw IOException("Route enthaelt keine Geometrie")
+            val points = decodePolyline(best.optString("geometry"))
             if (points.size < 2) throw IOException("Route enthaelt keine Geometrie")
-            RouteGeometry(points, label)
+            RouteGeometry(
+                points = points,
+                label = label,
+                segmentSeconds = segmentSeconds(best, points.size),
+            )
         }
+    }
+
+    /**
+     * Fahrzeit je Segment aus den OSRM-Annotationen. Die Summe der Annotationen weicht
+     * leicht von der Gesamtdauer der Route ab (Abbiegekosten), deshalb wird linear
+     * skaliert, damit die Ankunft am Ziel zur ausgewiesenen Fahrzeit passt.
+     */
+    private fun segmentSeconds(route: JSONObject, pointCount: Int): List<Double>? {
+        val legs = route.optJSONArray("legs") ?: return null
+        val durations = mutableListOf<Double>()
+        for (i in 0 until legs.length()) {
+            val annotation = legs.optJSONObject(i)?.optJSONObject("annotation")
+            val values = annotation?.optJSONArray("duration") ?: continue
+            for (j in 0 until values.length()) durations += values.optDouble(j, 0.0)
+        }
+        if (durations.size != pointCount - 1) return null
+
+        val sum = durations.sum()
+        val total = route.optDouble("duration", 0.0)
+        if (sum <= 0.0 || total <= 0.0) return durations
+        val factor = total / sum
+        return durations.map { it * factor }
     }
 
     companion object {

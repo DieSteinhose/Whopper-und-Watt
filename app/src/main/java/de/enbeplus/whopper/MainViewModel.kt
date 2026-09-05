@@ -22,6 +22,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.LocalDateTime
 
 enum class SearchMode { RADIUS, ROUTE }
 
@@ -39,6 +40,8 @@ data class UiState(
     val maxGapMeters: Int = 300,
     val onlyEnbw: Boolean = true,
     val corridorMeters: Int = 3000,
+    /** Abfahrtszeit; null bedeutet "jetzt" und wird bei jeder Auswertung neu gelesen. */
+    val departureAt: LocalDateTime? = null,
     val route: RouteGeometry? = null,
     /** Aus einem ABRP-Export uebernommene Adresse, die die UI ins Zielfeld schreibt. */
     val destinationSuggestion: String? = null,
@@ -90,6 +93,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             meters <= fetchedCorridorMeters -> recompute()
             else -> searchAlongRoute(route)
         }
+    }
+
+    /** null setzt auf "jetzt" zurueck. */
+    fun setDeparture(at: LocalDateTime?) {
+        _state.update { it.copy(departureAt = at) }
+        recompute()
+    }
+
+    fun setDepartureInHours(hours: Long) {
+        setDeparture(LocalDateTime.now().plusHours(hours))
     }
 
     fun selectSpot(key: String?) {
@@ -434,6 +447,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             },
             route = current.route.takeIf { current.mode == SearchMode.ROUTE },
             maxRouteOffsetMeters = current.corridorMeters,
+            departure = current.departureAt ?: LocalDateTime.now(),
         )
         _state.update { it.copy(spots = spots) }
     }

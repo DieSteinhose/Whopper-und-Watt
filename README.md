@@ -17,6 +17,27 @@ auf 1, 3 oder 5 km einstellbar.
 In beiden Fällen gilt: einstellbarer Maximalabstand zwischen Säule und Filiale (100 bis 1000 m),
 Filter auf EnBW, Liste und Karte mit Verbindungslinie, Navigation per `geo:`-Intent.
 
+## Hat der Laden dann überhaupt auf?
+
+Einstellbare Abfahrtszeit: jetzt, +1/+2/+4 Stunden oder eine feste Uhrzeit. Daraus plus der
+Fahrzeit von OSRM (Segment für Segment, `annotations=duration`) ergibt sich für jede Filiale
+eine voraussichtliche Ankunftszeit. Gegen diese Zeit wird das OSM-Tag `opening_hours` ausgewertet.
+
+Geschlossene Filialen verschwinden nicht, sie treten zurück: in der Liste blass, auf der Karte
+mit grauem Marker und blasser Verbindungslinie. Dazu steht dran, wann wieder geöffnet ist.
+
+Der Auswerter deckt bewusst nur eine Teilmenge der `opening_hours`-Spezifikation ab, dafür
+zuverlässig: Wochentage einzeln, als Liste und als Bereich über den Sonntag hinweg (`Su-Th`),
+mehrere Fenster pro Tag, Fenster über Mitternacht, Regeln ohne Wochentag, `off`, `24/7` und
+die in echten Daten wild gemischten Trenner `;` und `,`. Was darüber hinausgeht (Monatsangaben,
+Kalenderwochen, Sonnenauf- und -untergang), wird als **unbekannt** gemeldet statt geraten.
+Feiertage (`PH`) werden ignoriert, weil dafür ein Feiertagskalender nötig wäre; das Ergebnis
+wird dann als "ohne Feiertage" markiert.
+
+Belastbarkeit: In der Stichprobe hatten 45 von 55 Filialen entlang der Teststrecke ein
+`opening_hours`-Tag. Alle 54 unterschiedlichen Angaben aus den Testdaten sind als
+Regressionstest hinterlegt, keine davon fällt als unbekannt durch.
+
 ## Pläne aus A Better Routeplanner
 
 **Share-Links gehen nicht.** ABRP hat keine offene Schnittstelle, über die sich ein Link

@@ -6,10 +6,11 @@ import kotlin.math.min
 
 data class RoutePoint(val lat: Double, val lon: Double)
 
-/** Wo ein Punkt an der Route liegt: Abstand zur Route und gefahrene Strecke ab Start. */
+/** Wo ein Punkt an der Route liegt: Abstand, gefahrene Strecke und Fahrzeit ab Start. */
 data class RouteMatch(
     val offsetMeters: Double,
     val progressMeters: Double,
+    val travelSeconds: Double,
 )
 
 /**
@@ -19,10 +20,17 @@ data class RouteMatch(
 class RouteGeometry(
     val points: List<RoutePoint>,
     val label: String,
+    /** Fahrzeit je Streckensegment in Sekunden, wie sie OSRM als Annotation liefert. */
+    segmentSeconds: List<Double>? = null,
 ) {
     private val cumulative: DoubleArray = DoubleArray(points.size)
+    private val cumulativeSeconds: DoubleArray = DoubleArray(points.size)
 
     val totalMeters: Double
+
+    /** Falsch, wenn die Fahrzeit nur aus der Strecke geschaetzt ist (etwa bei GPX). */
+    val hasMeasuredDurations: Boolean = segmentSeconds != null &&
+        segmentSeconds.size == points.size - 1
 
     init {
         require(points.size >= 2) { "Eine Route braucht mindestens zwei Punkte" }
@@ -35,7 +43,17 @@ class RouteGeometry(
             cumulative[i] = sum
         }
         totalMeters = sum
+
+        for (i in 1 until points.size) {
+            cumulativeSeconds[i] = if (hasMeasuredDurations) {
+                cumulativeSeconds[i - 1] + segmentSeconds!![i - 1]
+            } else {
+                cumulative[i] / ASSUMED_SPEED_METERS_PER_SECOND
+            }
+        }
     }
+
+    val totalSeconds: Double get() = cumulativeSeconds.last()
 
     /**
      * Kuerzester Abstand zur Route. Gerechnet wird in einer lokalen Meter-Ebene
@@ -50,6 +68,7 @@ class RouteGeometry(
 
         var bestDistance = Double.MAX_VALUE
         var bestProgress = 0.0
+        var bestSeconds = 0.0
 
         for (i in 1 until points.size) {
             val a = points[i - 1]
@@ -71,11 +90,16 @@ class RouteGeometry(
             val distance = Math.hypot(px - cx, py - cy)
             if (distance < bestDistance) {
                 bestDistance = distance
-                val segmentLength = cumulative[i] - cumulative[i - 1]
-                bestProgress = cumulative[i - 1] + t * segmentLength
+                bestProgress = cumulative[i - 1] + t * (cumulative[i] - cumulative[i - 1])
+                bestSeconds = cumulativeSeconds[i - 1] +
+                    t * (cumulativeSeconds[i] - cumulativeSeconds[i - 1])
             }
         }
-        return RouteMatch(offsetMeters = bestDistance, progressMeters = bestProgress)
+        return RouteMatch(
+            offsetMeters = bestDistance,
+            progressMeters = bestProgress,
+            travelSeconds = bestSeconds,
+        )
     }
 
     /**
@@ -96,6 +120,9 @@ class RouteGeometry(
         return result
     }
 }
+
+/** Ohne Fahrzeiten aus dem Router wird mit dieser Reisegeschwindigkeit gerechnet. */
+private const val ASSUMED_SPEED_METERS_PER_SECOND = 80_000.0 / 3600.0
 
 /** Google-Encoded-Polyline, wie sie OSRM standardmaessig liefert. */
 fun decodePolyline(encoded: String, precision: Int = 5): List<RoutePoint> {

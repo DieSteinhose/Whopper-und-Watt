@@ -24,14 +24,17 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import de.enbeplus.whopper.SearchMode
 import de.enbeplus.whopper.UiState
 import de.enbeplus.whopper.key
+import de.enbeplus.whopper.model.OpenState
 import de.enbeplus.whopper.model.Spot
 import de.enbeplus.whopper.model.formatMeters
 import de.enbeplus.whopper.model.maxPowerKw
+import java.time.LocalDateTime
 
 @Composable
 fun SpotList(
@@ -155,9 +158,13 @@ private fun SpotCard(
 ) {
     val charger = spot.nearest.charger
     val power = maxPowerKw(charger.tags)
+    val closed = spot.isClosedOnArrival
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        // Geschlossene Filialen bleiben sichtbar, treten aber zurueck.
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (closed) 0.45f else 1f),
+        elevation = CardDefaults.cardElevation(defaultElevation = if (closed) 0.dp else 2.dp),
     ) {
         Column(Modifier.padding(16.dp)) {
             Text(
@@ -167,6 +174,30 @@ private fun SpotCard(
             )
             spot.burger.address?.let {
                 Text(text = it, style = MaterialTheme.typography.bodySmall)
+            }
+
+            val arrival = spot.arrival
+            val openState = spot.openState
+            if (arrival != null && openState != null) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = describeArrival(
+                        arrival = arrival,
+                        reference = LocalDateTime.now(),
+                        onRoute = spot.routeProgressMeters != null,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = describeOpenState(openState, arrival),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = when (openState) {
+                        is OpenState.Open -> MaterialTheme.colorScheme.primary
+                        is OpenState.Closed -> MaterialTheme.colorScheme.error
+                        is OpenState.Unknown -> MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
             }
 
             Spacer(Modifier.height(10.dp))
