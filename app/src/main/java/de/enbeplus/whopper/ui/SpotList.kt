@@ -12,19 +12,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import de.enbeplus.whopper.SearchMode
 import de.enbeplus.whopper.UiState
 import de.enbeplus.whopper.key
 import de.enbeplus.whopper.model.Spot
@@ -40,76 +42,48 @@ fun SpotList(
 ) {
     val error = state.error
     when {
-        state.loading -> Column(
-            modifier = modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            CircularProgressIndicator()
-            Spacer(Modifier.height(16.dp))
-            Text("Suche laeuft ...")
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "Die OSM-Abfrage dauert bei ${state.radiusKm} km Umkreis " +
-                    if (state.radiusKm >= 100) "gut eine Minute." else "einige Sekunden.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
+        state.loading -> CenteredMessage(
+            modifier = modifier,
+            title = state.progress ?: "Suche laeuft ...",
+            body = if (state.mode == SearchMode.ROUTE) {
+                "Lange Routen brauchen mehrere Overpass-Abfragen, das dauert ein paar Minuten."
+            } else {
+                "Die OSM-Abfrage dauert je nach Umkreis einige Sekunden."
+            },
+            showSpinner = true,
+        )
 
-        error != null -> Column(
-            modifier = modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = error,
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
+        error != null -> CenteredMessage(
+            modifier = modifier,
+            title = "Das hat nicht geklappt",
+            body = error,
+            isError = true,
+        )
 
-        !state.searchedOnce -> Column(
-            modifier = modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = "Laden und Whopper in einem Stopp",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Standort freigeben oder oben einen Ort eingeben, dann auf Suchen tippen.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
+        !state.searchedOnce -> CenteredMessage(
+            modifier = modifier,
+            title = "Laden und Whopper in einem Stopp",
+            body = "Umkreis: Ort eingeben oder Standort freigeben. " +
+                "Route: Start und Ziel eintippen, oder eine GPX-Datei laden.",
+        )
 
-        state.spots.isEmpty() -> Column(
-            modifier = modifier
-                .fillMaxSize()
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-        ) {
-            Text(
-                text = "Keine Kombi gefunden.",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Im Umkreis von ${state.radiusKm} km: ${state.burgersFound} Burger King, " +
-                    "${state.chargersFound} Ladesaeulen, aber keine im Abstand von " +
-                    "${state.maxGapMeters} m zueinander. Radius oder Abstand erhoehen, " +
-                    "oder den EnBW-Filter ausschalten.",
-                style = MaterialTheme.typography.bodyMedium,
-            )
-        }
+        state.spots.isEmpty() -> CenteredMessage(
+            modifier = modifier,
+            title = "Keine Kombi gefunden",
+            body = buildString {
+                append("Gefunden wurden ${state.burgersFound} Filialen und ")
+                append("${state.chargersFound} Ladesaeulen, aber keine davon im Abstand ")
+                append("von ${state.maxGapMeters} m zueinander")
+                append(if (state.onlyEnbw) " und mit EnBW-Tag. " else ". ")
+                append(
+                    if (state.mode == SearchMode.ROUTE) {
+                        "Korridor oder Abstand erhoehen, oder den EnBW-Filter ausschalten."
+                    } else {
+                        "Umkreis oder Abstand erhoehen, oder den EnBW-Filter ausschalten."
+                    },
+                )
+            },
+        )
 
         else -> LazyColumn(
             modifier = modifier.fillMaxSize(),
@@ -120,6 +94,56 @@ fun SpotList(
                 SpotCard(spot = spot, onNavigate = onNavigate, onShowOnMap = onShowOnMap)
             }
         }
+    }
+}
+
+@Composable
+fun MessageBanner(text: String, onDismiss: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onDismiss) { Text("OK") }
+        }
+    }
+}
+
+@Composable
+private fun CenteredMessage(
+    title: String,
+    body: String,
+    modifier: Modifier = Modifier,
+    isError: Boolean = false,
+    showSpinner: Boolean = false,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        if (showSpinner) {
+            CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(text = body, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -151,15 +175,29 @@ private fun SpotCard(
                     onClick = {},
                     enabled = false,
                     label = { Text("${formatMeters(spot.nearest.gapMeters)} zur Saeule") },
-                    colors = AssistChipDefaults.assistChipColors(),
                 )
-                spot.distanceFromMeMeters?.let {
+                val progress = spot.routeProgressMeters
+                val distance = spot.distanceFromMeMeters
+                if (progress != null) {
                     AssistChip(
                         onClick = {},
                         enabled = false,
-                        label = { Text("${formatMeters(it)} entfernt") },
+                        label = { Text("km ${(progress / 1000).toInt()} ab Start") },
+                    )
+                } else if (distance != null) {
+                    AssistChip(
+                        onClick = {},
+                        enabled = false,
+                        label = { Text("${formatMeters(distance)} entfernt") },
                     )
                 }
+            }
+            spot.routeOffsetMeters?.let {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "${formatMeters(it)} neben der Route",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Spacer(Modifier.height(10.dp))

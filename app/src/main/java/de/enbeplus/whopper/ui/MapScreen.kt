@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import de.enbeplus.whopper.R
 import de.enbeplus.whopper.UiState
 import de.enbeplus.whopper.key
 import de.enbeplus.whopper.model.Spot
@@ -27,6 +29,9 @@ fun MapScreen(state: UiState, modifier: Modifier = Modifier) {
             setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
             isTilesScaledToDpi = true
+            zoomController.setVisibility(
+                org.osmdroid.views.CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT,
+            )
             controller.setZoom(11.0)
         }
     }
@@ -39,7 +44,7 @@ fun MapScreen(state: UiState, modifier: Modifier = Modifier) {
         }
     }
 
-    LaunchedEffect(state.spots, state.selectedSpotKey, state.originLat, state.originLon) {
+    LaunchedEffect(state.spots, state.selectedSpotKey, state.route, state.originLat, state.originLon) {
         renderOverlays(mapView, state)
     }
 
@@ -48,6 +53,19 @@ fun MapScreen(state: UiState, modifier: Modifier = Modifier) {
 
 private fun renderOverlays(map: MapView, state: UiState) {
     map.overlays.clear()
+
+    val burgerIcon = ContextCompat.getDrawable(map.context, R.drawable.ic_marker_burger)
+    val chargerIcon = ContextCompat.getDrawable(map.context, R.drawable.ic_marker_charger)
+
+    state.route?.let { route ->
+        map.overlays.add(
+            Polyline(map).apply {
+                setPoints(route.points.map { GeoPoint(it.lat, it.lon) })
+                outlinePaint.color = Color.argb(180, 0x1E, 0x6F, 0xC4)
+                outlinePaint.strokeWidth = 8f
+            },
+        )
+    }
 
     state.spots.forEach { spot ->
         val burgerPoint = GeoPoint(spot.burger.lat, spot.burger.lon)
@@ -64,7 +82,8 @@ private fun renderOverlays(map: MapView, state: UiState) {
         map.overlays.add(
             Marker(map).apply {
                 position = burgerPoint
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
+                burgerIcon?.let { icon = it }
                 title = spot.burger.name ?: "Burger King"
                 snippet = "${formatMeters(spot.nearest.gapMeters)} zur naechsten Ladesaeule"
             },
@@ -75,7 +94,7 @@ private fun renderOverlays(map: MapView, state: UiState) {
                 Marker(map).apply {
                     position = GeoPoint(hit.charger.lat, hit.charger.lon)
                     setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                    setTextIcon("Laden")
+                    chargerIcon?.let { icon = it }
                     title = hit.charger.tags["operator"]
                         ?: hit.charger.tags["network"]
                         ?: "Ladesaeule"
@@ -88,19 +107,6 @@ private fun renderOverlays(map: MapView, state: UiState) {
         }
     }
 
-    val originLat = state.originLat
-    val originLon = state.originLon
-    if (originLat != null && originLon != null) {
-        map.overlays.add(
-            Marker(map).apply {
-                position = GeoPoint(originLat, originLon)
-                setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_CENTER)
-                setTextIcon("Start")
-                title = state.originLabel ?: "Suchmittelpunkt"
-            },
-        )
-    }
-
     map.invalidate()
     moveCamera(map, state)
 }
@@ -110,8 +116,8 @@ private fun moveCamera(map: MapView, state: UiState) {
         state.spots.firstOrNull { it.key() == key }
     }
 
-    if (selected != null) {
-        map.post {
+    val move: () -> Unit = {
+        if (selected != null) {
             map.controller.setZoom(17.0)
             map.controller.setCenter(
                 GeoPoint(
@@ -119,30 +125,47 @@ private fun moveCamera(map: MapView, state: UiState) {
                     (selected.burger.lon + selected.nearest.charger.lon) / 2,
                 ),
             )
+        } else {
+            val points = collectPoints(state)
+            when {
+                points.isEmpty() -> Unit
+                points.size == 1 -> {
+                    map.controller.setZoom(14.0)
+                    map.controller.setCenter(points.first())
+                }
+
+                else -> runCatching {
+                    map.zoomToBoundingBox(
+                        BoundingBox.fromGeoPointsSafe(points).increaseByScale(1.15f),
+                        false,
+                        48,
+                    )
+                }
+            }
         }
-        return
     }
+
+    // zoomToBoundingBox braucht eine bereits vermessene View, sonst passiert nichts.
+    if (map.width > 0 && map.height > 0) {
+        map.post(move)
+    } else {
+        map.addOnFirstLayoutListener { _, _, _, _, _ -> map.post(move) }
+    }
+}
+
+private fun collectPoints(state: UiState): List<GeoPoint> {
+    val route = state.route
+    if (route != null) return route.points.map { GeoPoint(it.lat, it.lon) }
 
     val originLat = state.originLat
     val originLon = state.originLon
-    val points = buildList {
+    return buildList {
         state.spots.forEach {
             add(GeoPoint(it.burger.lat, it.burger.lon))
             add(GeoPoint(it.nearest.charger.lat, it.nearest.charger.lon))
         }
         if (originLat != null && originLon != null) {
             add(GeoPoint(originLat, originLon))
-        }
-    }
-    if (points.isEmpty()) return
-
-    map.post {
-        if (points.size == 1) {
-            map.controller.setZoom(14.0)
-            map.controller.setCenter(points.first())
-        } else {
-            val box = BoundingBox.fromGeoPointsSafe(points).increaseByScale(1.2f)
-            runCatching { map.zoomToBoundingBox(box, false, 64) }
         }
     }
 }

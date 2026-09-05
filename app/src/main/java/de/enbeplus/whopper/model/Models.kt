@@ -37,6 +37,10 @@ data class Spot(
     val burger: Poi,
     val chargers: List<ChargerHit>,
     val distanceFromMeMeters: Double?,
+    /** Nur im Routenmodus: Luftlinie von der Route zur Filiale. */
+    val routeOffsetMeters: Double? = null,
+    /** Nur im Routenmodus: gefahrene Strecke ab Start bis zur Abzweigung. */
+    val routeProgressMeters: Double? = null,
 ) {
     val nearest: ChargerHit get() = chargers.first()
 }

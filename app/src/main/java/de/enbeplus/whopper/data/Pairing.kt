@@ -2,6 +2,7 @@ package de.enbeplus.whopper.data
 
 import de.enbeplus.whopper.model.ChargerHit
 import de.enbeplus.whopper.model.Poi
+import de.enbeplus.whopper.model.RouteGeometry
 import de.enbeplus.whopper.model.Spot
 import de.enbeplus.whopper.model.haversineMeters
 
@@ -45,9 +46,11 @@ object Pairing {
         maxGapMeters: Int,
         onlyEnbw: Boolean,
         origin: Pair<Double, Double>?,
+        route: RouteGeometry? = null,
+        maxRouteOffsetMeters: Int = Int.MAX_VALUE,
     ): List<Spot> {
         val usable = if (onlyEnbw) chargers.filter(EnbwFilter::isEnbw) else chargers
-        return burgers.mapNotNull { burger ->
+        val spots = burgers.mapNotNull { burger ->
             val hits = usable
                 .map { charger ->
                     ChargerHit(
@@ -57,17 +60,26 @@ object Pairing {
                 }
                 .filter { it.gapMeters <= maxGapMeters }
                 .sortedBy { it.gapMeters }
-            if (hits.isEmpty()) {
-                null
-            } else {
-                Spot(
-                    burger = burger,
-                    chargers = hits,
-                    distanceFromMeMeters = origin?.let { (lat, lon) ->
-                        haversineMeters(lat, lon, burger.lat, burger.lon)
-                    },
-                )
-            }
-        }.sortedBy { it.distanceFromMeMeters ?: it.nearest.gapMeters }
+            if (hits.isEmpty()) return@mapNotNull null
+
+            val match = route?.match(burger.lat, burger.lon)
+            if (match != null && match.offsetMeters > maxRouteOffsetMeters) return@mapNotNull null
+
+            Spot(
+                burger = burger,
+                chargers = hits,
+                distanceFromMeMeters = origin?.let { (lat, lon) ->
+                    haversineMeters(lat, lon, burger.lat, burger.lon)
+                },
+                routeOffsetMeters = match?.offsetMeters,
+                routeProgressMeters = match?.progressMeters,
+            )
+        }
+        // Auf einer Route zaehlt die Reihenfolge der Fahrt, sonst die Naehe zum Startpunkt.
+        return if (route != null) {
+            spots.sortedBy { it.routeProgressMeters ?: 0.0 }
+        } else {
+            spots.sortedBy { it.distanceFromMeMeters ?: it.nearest.gapMeters }
+        }
     }
 }

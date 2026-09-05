@@ -13,6 +13,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,6 +28,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -55,6 +57,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import de.enbeplus.whopper.data.LocationProvider
 import de.enbeplus.whopper.data.OverpassClient
 import de.enbeplus.whopper.ui.MapScreen
+import de.enbeplus.whopper.ui.MessageBanner
 import de.enbeplus.whopper.ui.SpotList
 import de.enbeplus.whopper.ui.WhopperTheme
 import org.osmdroid.config.Configuration
@@ -88,6 +91,9 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
 
     var tab by remember { mutableIntStateOf(0) }
     var place by remember { mutableStateOf("") }
+    var routeStart by remember { mutableStateOf("") }
+    var routeDestination by remember { mutableStateOf("") }
+    var showOptions by remember { mutableStateOf(true) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -103,11 +109,12 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
         }
     }
 
-    fun searchHere() {
-        keyboard?.hide()
-        if (place.isNotBlank()) {
-            viewModel.searchPlace(place)
-        } else if (LocationProvider.hasPermission(context)) {
+    val gpxLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? -> uri?.let(viewModel::loadGpx) }
+
+    fun requestLocationSearch() {
+        if (LocationProvider.hasPermission(context)) {
             viewModel.searchAroundMe()
         } else {
             permissionLauncher.launch(
@@ -116,6 +123,20 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
                     Manifest.permission.ACCESS_FINE_LOCATION,
                 ),
             )
+        }
+    }
+
+    fun startSearch() {
+        keyboard?.hide()
+        // Auf der Karte nimmt der eingeklappte Kopfbereich weniger Platz weg.
+        if (tab == 1) showOptions = false
+        when (state.mode) {
+            SearchMode.ROUTE -> viewModel.searchRoute(routeStart, routeDestination)
+            SearchMode.RADIUS -> if (place.isNotBlank()) {
+                viewModel.searchPlace(place)
+            } else {
+                requestLocationSearch()
+            }
         }
     }
 
@@ -138,12 +159,16 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
                 title = {
                     Column {
                         Text("Whopper & Watt")
-                        val subtitle = if (state.searchedOnce) {
-                            "${state.spots.size} Kombis · ${state.originLabel ?: ""}"
-                        } else {
-                            "Burger King neben der Ladesaeule"
-                        }
-                        Text(subtitle, style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            text = when {
+                                state.loading -> state.progress ?: "Suche laeuft ..."
+                                state.searchedOnce ->
+                                    "${state.spots.size} Kombis · ${state.originLabel.orEmpty()}"
+
+                                else -> "Burger King neben der Ladesaeule"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                        )
                     }
                 },
             )
@@ -157,59 +182,71 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
             SearchControls(
                 state = state,
                 place = place,
+                routeStart = routeStart,
+                routeDestination = routeDestination,
+                showOptions = showOptions,
                 onPlaceChange = { place = it },
-                onSearch = ::searchHere,
+                onRouteStartChange = { routeStart = it },
+                onRouteDestinationChange = { routeDestination = it },
+                onToggleOptions = { showOptions = !showOptions },
+                onMode = viewModel::setMode,
+                onSearch = ::startSearch,
                 onUseLocation = {
                     place = ""
                     keyboard?.hide()
-                    if (LocationProvider.hasPermission(context)) {
-                        viewModel.searchAroundMe()
-                    } else {
-                        permissionLauncher.launch(
-                            arrayOf(
-                                Manifest.permission.ACCESS_COARSE_LOCATION,
-                                Manifest.permission.ACCESS_FINE_LOCATION,
-                            ),
-                        )
-                    }
+                    requestLocationSearch()
                 },
+                onOpenGpx = { gpxLauncher.launch(arrayOf("*/*")) },
                 onRadius = viewModel::setRadius,
+                onCorridor = viewModel::setCorridor,
                 onGap = viewModel::setMaxGap,
                 onOnlyEnbw = viewModel::setOnlyEnbw,
             )
 
+            if (state.loading) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            state.hint?.let { hint ->
+                MessageBanner(text = hint, onDismiss = viewModel::dismissMessages)
+            }
+
             TabRow(selectedTabIndex = tab) {
-                Tab(
-                    selected = tab == 0,
-                    onClick = { tab = 0 },
-                    text = { Text("Liste") },
-                )
+                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Liste") })
                 Tab(
                     selected = tab == 1,
-                    onClick = { tab = 1 },
+                    onClick = {
+                        tab = 1
+                        showOptions = false
+                    },
                     text = { Text("Karte") },
                 )
             }
 
-            if (tab == 0) {
-                SpotList(
-                    state = state,
-                    onNavigate = ::navigateTo,
-                    onShowOnMap = { spot ->
-                        viewModel.selectSpot(spot.key())
-                        tab = 1
-                    },
-                    modifier = Modifier.fillMaxSize(),
-                )
-            } else {
-                Column(Modifier.fillMaxSize()) {
-                    if (state.selectedSpotKey != null) {
-                        TextButton(onClick = { viewModel.selectSpot(null) }) {
-                            Text("Alle Treffer zeigen")
-                        }
-                    }
+            // weight(1f) statt fillMaxSize: der Inhalt bekommt exakt den Rest der Hoehe,
+            // sonst schiebt die Karte die Bedienelemente aus dem Bild.
+            Box(modifier = Modifier.weight(1f)) {
+                if (tab == 0) {
+                    SpotList(
+                        state = state,
+                        onNavigate = ::navigateTo,
+                        onShowOnMap = { spot ->
+                            viewModel.selectSpot(spot.key())
+                            showOptions = false
+                            tab = 1
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
                     MapScreen(state = state, modifier = Modifier.fillMaxSize())
                 }
+            }
+
+            if (tab == 1 && state.selectedSpotKey != null) {
+                TextButton(
+                    onClick = { viewModel.selectSpot(null) },
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                ) { Text("Alle Treffer auf der Karte zeigen") }
             }
         }
     }
@@ -219,67 +256,134 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
 private fun SearchControls(
     state: UiState,
     place: String,
+    routeStart: String,
+    routeDestination: String,
+    showOptions: Boolean,
     onPlaceChange: (String) -> Unit,
+    onRouteStartChange: (String) -> Unit,
+    onRouteDestinationChange: (String) -> Unit,
+    onToggleOptions: () -> Unit,
+    onMode: (SearchMode) -> Unit,
     onSearch: () -> Unit,
     onUseLocation: () -> Unit,
+    onOpenGpx: () -> Unit,
     onRadius: (Int) -> Unit,
+    onCorridor: (Int) -> Unit,
     onGap: (Int) -> Unit,
     onOnlyEnbw: (Boolean) -> Unit,
 ) {
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = place,
-                onValueChange = onPlaceChange,
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                label = { Text("Ort (leer = mein Standort)") },
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            FilterChip(
+                selected = state.mode == SearchMode.RADIUS,
+                onClick = { onMode(SearchMode.RADIUS) },
+                label = { Text("Umkreis") },
             )
             Spacer(Modifier.width(8.dp))
-            Button(onClick = onSearch, enabled = !state.loading) { Text("Suchen") }
-        }
-
-        Spacer(Modifier.height(4.dp))
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Umkreis", style = MaterialTheme.typography.labelMedium)
-            listOf(10, 25, 50, 100).forEach { km ->
-                FilterChip(
-                    selected = state.radiusKm == km,
-                    onClick = { onRadius(km) },
-                    label = { Text("$km km") },
-                )
-            }
-        }
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Abstand", style = MaterialTheme.typography.labelMedium)
-            listOf(100, 300, 500, 1000).forEach { meters ->
-                FilterChip(
-                    selected = state.maxGapMeters == meters,
-                    onClick = { onGap(meters) },
-                    label = { Text("$meters m") },
-                )
-            }
             FilterChip(
-                selected = state.onlyEnbw,
-                onClick = { onOnlyEnbw(!state.onlyEnbw) },
-                label = { Text("nur EnBW") },
+                selected = state.mode == SearchMode.ROUTE,
+                onClick = { onMode(SearchMode.ROUTE) },
+                label = { Text("Route") },
             )
-            TextButton(onClick = onUseLocation) { Text("Standort") }
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onToggleOptions) {
+                Text(if (showOptions) "Optionen aus" else "Optionen")
+            }
         }
+
+        if (state.mode == SearchMode.RADIUS) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = place,
+                    onValueChange = onPlaceChange,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Ort (leer = mein Standort)") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = onSearch, enabled = !state.loading) { Text("Suchen") }
+            }
+        } else {
+            OutlinedTextField(
+                value = routeStart,
+                onValueChange = onRouteStartChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("Start (leer = mein Standort)") },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+            )
+            Spacer(Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = routeDestination,
+                    onValueChange = onRouteDestinationChange,
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("Ziel") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+                )
+                Spacer(Modifier.width(8.dp))
+                Button(onClick = onSearch, enabled = !state.loading) { Text("Suchen") }
+            }
+        }
+
+        if (showOptions) {
+            Spacer(Modifier.height(4.dp))
+            if (state.mode == SearchMode.RADIUS) {
+                ChipRow(label = "Umkreis") {
+                    listOf(10, 25, 50, 100).forEach { km ->
+                        FilterChip(
+                            selected = state.radiusKm == km,
+                            onClick = { onRadius(km) },
+                            label = { Text("$km km") },
+                        )
+                    }
+                    TextButton(onClick = onUseLocation) { Text("Standort") }
+                }
+            } else {
+                ChipRow(label = "Korridor") {
+                    listOf(1000, 3000, 5000).forEach { meters ->
+                        FilterChip(
+                            selected = state.corridorMeters == meters,
+                            onClick = { onCorridor(meters) },
+                            label = { Text("${meters / 1000} km") },
+                        )
+                    }
+                    TextButton(onClick = onOpenGpx) { Text("GPX oeffnen") }
+                }
+            }
+
+            ChipRow(label = "Abstand") {
+                listOf(100, 300, 500, 1000).forEach { meters ->
+                    FilterChip(
+                        selected = state.maxGapMeters == meters,
+                        onClick = { onGap(meters) },
+                        label = { Text("$meters m") },
+                    )
+                }
+                FilterChip(
+                    selected = state.onlyEnbw,
+                    onClick = { onOnlyEnbw(!state.onlyEnbw) },
+                    label = { Text("nur EnBW") },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChipRow(label: String, content: @Composable () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelMedium)
+        content()
     }
 }
