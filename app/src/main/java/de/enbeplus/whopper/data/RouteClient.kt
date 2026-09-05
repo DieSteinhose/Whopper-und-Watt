@@ -28,15 +28,14 @@ class RouteClient {
         .readTimeout(90, TimeUnit.SECONDS)
         .build()
 
+    /** Route ueber beliebig viele Zwischenpunkte, in der uebergebenen Reihenfolge. */
     suspend fun route(
-        startLat: Double,
-        startLon: Double,
-        destLat: Double,
-        destLon: Double,
+        waypoints: List<RoutePoint>,
         label: String,
     ): RouteGeometry = withContext(Dispatchers.IO) {
-        val url = "$OSRM_BASE/route/v1/driving/" +
-            "$startLon,$startLat;$destLon,$destLat" +
+        require(waypoints.size >= 2) { "Eine Route braucht Start und Ziel" }
+        val coordinates = waypoints.joinToString(";") { "${it.lon},${it.lat}" }
+        val url = "$OSRM_BASE/route/v1/driving/$coordinates" +
             "?overview=full&geometries=polyline&alternatives=false&steps=false"
         val request = Request.Builder()
             .url(url)

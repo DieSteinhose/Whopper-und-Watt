@@ -110,9 +110,17 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
         }
     }
 
-    val gpxLauncher = rememberLauncherForActivityResult(
+    val planLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
-    ) { uri: Uri? -> uri?.let(viewModel::loadGpx) }
+    ) { uri: Uri? -> uri?.let(viewModel::loadPlan) }
+
+    // Bringt ein ABRP-Export nur eine brauchbare Adresse mit, landet sie im Zielfeld.
+    LaunchedEffect(state.destinationSuggestion) {
+        state.destinationSuggestion?.let { suggestion ->
+            routeDestination = suggestion
+            viewModel.consumeDestinationSuggestion()
+        }
+    }
 
     fun requestLocationSearch() {
         if (LocationProvider.hasPermission(context)) {
@@ -197,7 +205,7 @@ private fun AppScreen(viewModel: MainViewModel = viewModel()) {
                     keyboard?.hide()
                     requestLocationSearch()
                 },
-                onOpenGpx = { gpxLauncher.launch(arrayOf("*/*")) },
+                onOpenPlan = { planLauncher.launch(arrayOf("*/*")) },
                 onRadius = viewModel::setRadius,
                 onCorridor = viewModel::setCorridor,
                 onGap = viewModel::setMaxGap,
@@ -272,7 +280,7 @@ private fun SearchControls(
     onMode: (SearchMode) -> Unit,
     onSearch: () -> Unit,
     onUseLocation: () -> Unit,
-    onOpenGpx: () -> Unit,
+    onOpenPlan: () -> Unit,
     onRadius: (Int) -> Unit,
     onCorridor: (Int) -> Unit,
     onGap: (Int) -> Unit,
@@ -358,7 +366,7 @@ private fun SearchControls(
                             label = { Text("${meters / 1000} km") },
                         )
                     }
-                    TextButton(onClick = onOpenGpx) { Text("GPX oeffnen") }
+                    TextButton(onClick = onOpenPlan) { Text("Plan oeffnen") }
                 }
             }
 

@@ -17,15 +17,26 @@ auf 1, 3 oder 5 km einstellbar.
 In beiden Fällen gilt: einstellbarer Maximalabstand zwischen Säule und Filiale (100 bis 1000 m),
 Filter auf EnBW, Liste und Karte mit Verbindungslinie, Navigation per `geo:`-Intent.
 
-## ABRP-Links funktionieren nicht, GPX schon
+## Pläne aus A Better Routeplanner
 
-A Better Routeplanner hat keine offene Schnittstelle, über die sich ein Share-Link
+**Share-Links gehen nicht.** ABRP hat keine offene Schnittstelle, über die sich ein Link
 (`?plan_uuid=...`) von außen auflösen ließe. Getestet: `api.iternio.com` antwortet ohne API-Key
-mit 404, und der interne Web-Key von ABRP gehört nicht in eine fremde App.
+mit 404, im Web-Bundle steht der Endpunkt nicht, und der interne Web-Key von ABRP gehört nicht
+in eine fremde App. Wer so einen Link ins Suchfeld klebt, bekommt genau diesen Hinweis.
 
-Der funktionierende Weg: in ABRP den Plan als **GPX exportieren** und die Datei hier über
-"GPX öffnen" laden. Dann wird exakt diese Route durchsucht. Wer einen ABRP-Link ins Suchfeld
-klebt, bekommt genau diesen Hinweis angezeigt.
+**Dateien gehen**, über "Plan öffnen". Zwei Formate, mit einem wichtigen Unterschied:
+
+- **GPX**: enthält die gefahrene Strecke punktgenau. Wird direkt übernommen.
+- **Excel (.xlsx)**: enthält **keine Koordinaten**, nur die Adresstexte der Wegpunkte in
+  Spalte A. Die App filtert Kopf-, Summen- und Einheitenzeilen heraus, geocodiert die
+  übrigen Adressen über Nominatim (eine Anfrage pro Sekunde, wie es die Nutzungsregeln
+  verlangen) und lässt OSRM eine Route durch diese Punkte legen.
+
+Die Grenze des Excel-Exports: Wegpunkte, die in ABRP per Klick auf die Karte gesetzt wurden,
+stehen dort als "Punkt auf der Karte" und tragen überhaupt keine Ortsangabe. Aus so einem
+Punkt lässt sich nichts rekonstruieren. Bleibt dadurch nur eine einzige Adresse übrig, trägt
+die App sie ins Zielfeld ein und sagt, dass der Start fehlt. Wer den Export brauchbar haben
+will, setzt die Wegpunkte in ABRP über die Adresssuche statt per Kartenklick.
 
 ## Warum die Abfragen so aussehen, wie sie aussehen
 
@@ -40,6 +51,9 @@ Overpass-Instanzen:
 | Route 419 km, Bounding-Boxen je Abschnitt | **21 s, 55 Filialen** |
 | Säulen an 20 Filialen per `around:` | 143 s |
 | Säulen an 20 Filialen per kleiner Box | 28 s |
+
+Ein kompletter Durchlauf Dortmund nach Oberhausen (52 km, Korridor 3 km) über beide Schritte:
+13 Filialen in 13 s, dazu 73 Säulen, daraus 4 EnBW-Kombis und 8 über alle Betreiber.
 
 Daraus folgt: Umkreissuche als eine einzige `around:`-Abfrage, Routensuche über
 Bounding-Boxen entlang der Strecke, danach die Säulen in kleinen Boxen um die gefundenen

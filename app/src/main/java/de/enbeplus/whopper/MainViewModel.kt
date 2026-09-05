@@ -9,10 +9,13 @@ import de.enbeplus.whopper.data.LocationProvider
 import de.enbeplus.whopper.data.OverpassClient
 import de.enbeplus.whopper.data.Pairing
 import de.enbeplus.whopper.data.RouteClient
+import de.enbeplus.whopper.data.XlsxPlanReader
 import de.enbeplus.whopper.model.Poi
 import de.enbeplus.whopper.model.RouteGeometry
+import de.enbeplus.whopper.model.RoutePoint
 import de.enbeplus.whopper.model.Spot
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -37,6 +40,8 @@ data class UiState(
     val onlyEnbw: Boolean = true,
     val corridorMeters: Int = 3000,
     val route: RouteGeometry? = null,
+    /** Aus einem ABRP-Export uebernommene Adresse, die die UI ins Zielfeld schreibt. */
+    val destinationSuggestion: String? = null,
     val searchedOnce: Boolean = false,
     val chargersFound: Int = 0,
     val burgersFound: Int = 0,
@@ -93,6 +98,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun dismissMessages() {
         _state.update { it.copy(error = null, hint = null) }
+    }
+
+    /** Die UI hat den Adressvorschlag aus dem Export ins Zielfeld uebernommen. */
+    fun consumeDestinationSuggestion() {
+        _state.update { it.copy(destinationSuggestion = null) }
     }
 
     // ---- Umkreissuche -------------------------------------------------------
@@ -195,10 +205,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
                 _state.update { it.copy(progress = "Route berechnen ...") }
                 val route = router.route(
-                    startLat = from.lat,
-                    startLon = from.lon,
-                    destLat = to.lat,
-                    destLon = to.lon,
+                    waypoints = listOf(
+                        RoutePoint(from.lat, from.lon),
+                        RoutePoint(to.lat, to.lon),
+                    ),
                     label = "${from.label} nach ${to.label}",
                 )
                 _state.update {
@@ -216,23 +226,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun loadGpx(uri: Uri) {
+    /** Nimmt GPX-Dateien und den Excel-Export von A Better Routeplanner. */
+    fun loadPlan(uri: Uri) {
         viewModelScope.launch {
             _state.update {
-                it.copy(loading = true, error = null, hint = null, progress = "GPX lesen ...", mode = SearchMode.ROUTE)
+                it.copy(
+                    loading = true,
+                    error = null,
+                    hint = null,
+                    progress = "Datei lesen ...",
+                    mode = SearchMode.ROUTE,
+                )
             }
             val route = try {
-                withContext(Dispatchers.IO) {
-                    val text = getApplication<Application>().contentResolver
+                val bytes = withContext(Dispatchers.IO) {
+                    getApplication<Application>().contentResolver
                         .openInputStream(uri)
-                        ?.bufferedReader()
-                        ?.use { it.readText() }
+                        ?.use { it.readBytes() }
                         ?: throw IllegalStateException("Datei nicht lesbar.")
-                    RouteClient.parseGpx(text, "GPX-Route")
+                }
+                // xlsx ist ein ZIP-Archiv und faengt mit PK an, GPX ist Text.
+                if (bytes.size > 2 && bytes[0] == 'P'.code.toByte() && bytes[1] == 'K'.code.toByte()) {
+                    routeFromExcelPlan(bytes)
+                } else {
+                    RouteClient.parseGpx(bytes.decodeToString(), "GPX-Route")
                         ?: throw IllegalStateException("Keine Streckenpunkte im GPX gefunden.")
                 }
             } catch (e: Exception) {
-                fail(e.message ?: "GPX konnte nicht gelesen werden.")
+                fail(e.message ?: "Die Datei konnte nicht gelesen werden.")
                 return@launch
             }
             _state.update {
@@ -245,6 +266,78 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             runRouteSearch(route)
         }
+    }
+
+    /**
+     * Baut aus dem ABRP-Excel eine Route. Der Export hat keine Koordinaten, also
+     * werden die Adresstexte geocodiert und anschliessend geroutet. Wegpunkte, die
+     * in ABRP auf der Karte angetippt wurden, heissen dort "Punkt auf der Karte"
+     * und enthalten nichts, woraus sich ein Ort ableiten liesse.
+     */
+    private suspend fun routeFromExcelPlan(bytes: ByteArray): RouteGeometry {
+        val plan = withContext(Dispatchers.Default) { XlsxPlanReader.read(bytes) }
+
+        if (plan.addresses.size < 2) {
+            _state.update {
+                it.copy(destinationSuggestion = plan.addresses.firstOrNull())
+            }
+            throw IllegalStateException(explainThinPlan(plan))
+        }
+
+        val points = mutableListOf<RoutePoint>()
+        val failed = mutableListOf<String>()
+        plan.addresses.forEachIndexed { index, address ->
+            _state.update {
+                it.copy(progress = "Adresse ${index + 1}/${plan.addresses.size} suchen ...")
+            }
+            val place = runCatching { geocoder.search(address) }.getOrNull()
+            if (place == null) failed += address else points += RoutePoint(place.lat, place.lon)
+            // Nominatim erlaubt eine Anfrage pro Sekunde.
+            if (index < plan.addresses.lastIndex) delay(1100)
+        }
+        if (points.size < 2) {
+            throw IllegalStateException(
+                "Von ${plan.addresses.size} Adressen im Plan war keine ausreichende Zahl " +
+                    "auffindbar: ${failed.joinToString("; ")}",
+            )
+        }
+
+        _state.update { it.copy(progress = "Route berechnen ...") }
+        val route = router.route(points, "ABRP-Plan (${points.size} Wegpunkte)")
+        if (failed.isNotEmpty() || plan.pointsWithoutAddress > 0) {
+            _state.update {
+                it.copy(
+                    hint = buildString {
+                        if (plan.pointsWithoutAddress > 0) {
+                            append(
+                                "${plan.pointsWithoutAddress} Wegpunkt(e) im Export sind " +
+                                    "\"Punkt auf der Karte\" und enthalten keine Ortsangabe. ",
+                            )
+                        }
+                        if (failed.isNotEmpty()) {
+                            append("Nicht gefunden: ${failed.joinToString("; ")}. ")
+                        }
+                        append("Die Route wurde aus den uebrigen Adressen gebaut.")
+                    },
+                )
+            }
+        }
+        return route
+    }
+
+    private fun explainThinPlan(plan: XlsxPlanReader.Plan): String = buildString {
+        append("Der ABRP-Excel-Export enthaelt keine Koordinaten, nur Adresstexte. ")
+        append("In diesem Plan hat ${plan.addresses.size} Wegpunkt eine Adresse")
+        if (plan.pointsWithoutAddress > 0) {
+            append(", ${plan.pointsWithoutAddress} weitere stehen als \"Punkt auf der Karte\" ")
+            append("ohne jede Ortsangabe")
+        }
+        append(". ")
+        if (plan.addresses.size == 1) {
+            append("Die gefundene Adresse steht jetzt im Zielfeld, Start bitte eintippen. ")
+        }
+        append("Dauerhafte Loesung: in ABRP die Wegpunkte ueber die Adresssuche setzen ")
+        append("statt per Klick auf die Karte, dann stehen sie auch im Export.")
     }
 
     private fun searchAlongRoute(route: RouteGeometry) {
@@ -352,8 +445,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         const val ABRP_HINT =
             "ABRP-Links lassen sich von aussen nicht auslesen, dafuer gibt es keine offene " +
-                "Schnittstelle. In ABRP den Plan als GPX exportieren und hier ueber " +
-                "\"GPX oeffnen\" laden, dann wird genau diese Route durchsucht."
+                "Schnittstelle. Stattdessen den Plan in ABRP exportieren und hier ueber " +
+                "\"Plan oeffnen\" laden: GPX bringt die Strecke punktgenau mit, der " +
+                "Excel-Export nur die Adressen der Wegpunkte, die dann geocodiert werden."
     }
 }
 
