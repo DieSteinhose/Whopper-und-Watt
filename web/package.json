@@ -1,0 +1,6 @@
+{
+  "name": "whopper-und-watt-web",
+  "private": true,
+  "type": "module",
+  "description": "Nur damit Node die Dateien hier als ES-Module liest. Der Browser braucht das nicht, die PWA hat keinen Build-Schritt und keine Abhaengigkeiten."
+}

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f2b46">
+  <title>Whopper &amp; Watt</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/vendor/leaflet.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="bar">
+    <div>
+      <h1>Whopper &amp; Watt</h1>
+      <p id="status">Burger King neben der Ladesäule</p>
+    </div>
+    <button id="installButton" class="ghost" hidden>Installieren</button>
+  </header>
+
+  <section class="controls">
+    <div class="row modes">
+      <button class="chip" data-mode="radius" aria-pressed="true">Umkreis</button>
+      <button class="chip" data-mode="route" aria-pressed="false">Route</button>
+      <button id="optionsToggle" class="ghost push">Optionen aus</button>
+    </div>
+
+    <form id="radiusForm" class="row">
+      <input id="placeInput" type="search" placeholder="Ort (leer = mein Standort)" autocomplete="off">
+      <button type="submit" class="primary">Suchen</button>
+    </form>
+
+    <form id="routeForm" class="stack" hidden>
+      <input id="startInput" type="search" placeholder="Start (leer = mein Standort)" autocomplete="off">
+      <div class="row">
+        <input id="destinationInput" type="search" placeholder="Ziel" autocomplete="off">
+        <button type="submit" class="primary">Suchen</button>
+      </div>
+    </form>
+
+    <div id="options">
+      <div class="row chips" id="radiusChips">
+        <span class="label">Umkreis</span>
+        <button class="chip" data-radius="10">10 km</button>
+        <button class="chip" data-radius="25" aria-pressed="true">25 km</button>
+        <button class="chip" data-radius="50">50 km</button>
+        <button class="chip" data-radius="100">100 km</button>
+        <button class="ghost" id="locateButton">Standort</button>
+      </div>
+
+      <div class="row chips" id="corridorChips" hidden>
+        <span class="label">Korridor</span>
+        <button class="chip" data-corridor="1000">1 km</button>
+        <button class="chip" data-corridor="3000" aria-pressed="true">3 km</button>
+        <button class="chip" data-corridor="5000">5 km</button>
+        <label class="ghost file">Plan öffnen
+          <input id="planInput" type="file" accept=".gpx,.xlsx" hidden>
+        </label>
+      </div>
+
+      <div class="row chips" id="departureChips">
+        <span class="label" id="departureLabel">Abfahrt jetzt</span>
+        <button class="chip" data-departure="now" aria-pressed="true">jetzt</button>
+        <button class="chip" data-departure="1">+1 h</button>
+        <button class="chip" data-departure="2">+2 h</button>
+        <button class="chip" data-departure="4">+4 h</button>
+        <input id="departureTime" type="time" aria-label="Abfahrtszeit">
+      </div>
+
+      <div class="row chips" id="gapChips">
+        <span class="label">Abstand</span>
+        <button class="chip" data-gap="100">100 m</button>
+        <button class="chip" data-gap="300" aria-pressed="true">300 m</button>
+        <button class="chip" data-gap="500">500 m</button>
+        <button class="chip" data-gap="1000">1000 m</button>
+        <button class="chip" id="enbwChip" aria-pressed="true">nur EnBW</button>
+      </div>
+    </div>
+  </section>
+
+  <p id="banner" class="banner" hidden></p>
+
+  <nav class="tabs">
+    <button class="tab" data-tab="list" aria-pressed="true">Liste</button>
+    <button class="tab" data-tab="map" aria-pressed="false">Karte</button>
+  </nav>
+
+  <main>
+    <div id="list" class="panel"></div>
+    <div id="map" class="panel" hidden></div>
+  </main>
+
+  <script src="/vendor/leaflet.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

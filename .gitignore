@@ -9,3 +9,10 @@ captures/
 .cxx/
 *.apk
 *.keystore
+
+# Server: die Datenbank selbst ist eingecheckt (Stichtag), Begleitdateien nicht.
+server/data/*.sqlite-journal
+server/data/*.sqlite-wal
+server/data/*.sqlite-shm
+__pycache__/
+*.pyc
