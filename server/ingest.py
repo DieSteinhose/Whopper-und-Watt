@@ -29,17 +29,20 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from geo import (  # noqa: E402
-    BURGER_KING_WIKIDATA,
+    BRANDS,
+    DEFAULT_BRANDS,
+    Brand,
     address_of,
     box_around,
     chunked,
     haversine_m,
-    is_burger_king,
     is_enbw,
+    matches_brand,
     max_power_kw,
 )
 
@@ -54,7 +57,7 @@ ENDPOINTS = (
 )
 USER_AGENT = "WhopperUndWatt/2.0 (PWA-Ingest; OpenStreetMap-Daten via Overpass)"
 
-BURGERS_PER_BLOCK = 20
+STORES_PER_BLOCK = 20
 CHARGER_SEARCH_M = 1000
 
 # Deutschland mit etwas Rand. Bewusst grosszuegig: eine Filiale kurz hinter der
@@ -64,8 +67,9 @@ GERMANY_BBOX = "47.20,5.80,55.10,15.10"
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
-CREATE TABLE IF NOT EXISTS burger (
+CREATE TABLE IF NOT EXISTS store (
     id TEXT PRIMARY KEY,
+    brand TEXT NOT NULL,
     lat REAL NOT NULL,
     lon REAL NOT NULL,
     name TEXT,
@@ -73,6 +77,7 @@ CREATE TABLE IF NOT EXISTS burger (
     opening_hours TEXT,
     tags TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS store_by_brand ON store(brand);
 
 CREATE TABLE IF NOT EXISTS charger (
     id TEXT PRIMARY KEY,
@@ -87,17 +92,17 @@ CREATE TABLE IF NOT EXISTS charger (
 );
 
 CREATE TABLE IF NOT EXISTS pair (
-    burger_id TEXT NOT NULL,
+    store_id TEXT NOT NULL,
     charger_id TEXT NOT NULL,
     gap_m REAL NOT NULL,
-    PRIMARY KEY (burger_id, charger_id)
+    PRIMARY KEY (store_id, charger_id)
 );
-CREATE INDEX IF NOT EXISTS pair_by_burger ON pair(burger_id, gap_m);
+CREATE INDEX IF NOT EXISTS pair_by_store ON pair(store_id, gap_m);
 
 -- Fortschritt des Ladesaeulen-Schritts, damit ein Abbruch nichts kostet.
 CREATE TABLE IF NOT EXISTS ingest_block (block INTEGER PRIMARY KEY, done_at TEXT NOT NULL);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS burger_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
+CREATE VIRTUAL TABLE IF NOT EXISTS store_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
 """
 
 
@@ -157,22 +162,28 @@ def element_point(element: dict) -> tuple[float, float] | None:
     return None
 
 
-def burger_query(prelude: str, selector: str) -> str:
+def store_query(prelude: str, selector: str, brands: Sequence[Brand]) -> str:
+    clauses = []
+    for brand in brands:
+        clauses.append(f'  nwr["brand:wikidata"="{brand.wikidata}"]{selector};')
+        for name in brand.names:
+            clauses.append(f'  nwr["brand"="{name}"]{selector};')
+            clauses.append(f'  nwr["name"="{name}"]{selector};')
+    joined = "\n".join(clauses)
     return f"""[out:json][timeout:300];
 {prelude}
 (
-  nwr["brand:wikidata"="{BURGER_KING_WIKIDATA}"]{selector};
-  nwr["brand"="Burger King"]{selector};
-  nwr["name"="Burger King"]{selector};
+{joined}
 );
 out center tags;"""
 
 
-def load_burgers(
+def load_stores(
     connection: sqlite3.Connection,
     bbox: str,
     country: str | None,
     seed: Path | None,
+    brands: Sequence[Brand],
 ) -> int:
     """Holt die Filialen, standardmaessig ueber eine Bounding-Box.
 
@@ -192,27 +203,39 @@ def load_burgers(
             # Nur ein Durchgang durch die Endpunkte: fehlende Area-Daten sind kein
             # Ausfall, den Warten heilt, sondern ein Grund fuer die Bounding-Box.
             payload = overpass(
-                burger_query(
-                    f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;', "(area.searched)"
+                store_query(
+                    f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;',
+                    "(area.searched)",
+                    brands,
                 ),
                 attempts=1,
             )
         except RuntimeError as error:
             print(f"  Flaechensuche gescheitert ({error}), weiche auf die Bounding-Box aus", flush=True)
-            payload = overpass(burger_query("", f"({bbox})"))
+            payload = overpass(store_query("", f"({bbox})", brands))
     else:
-        print(f"Filialen im Bereich {bbox} abfragen (dauert einige Minuten)", flush=True)
-        payload = overpass(burger_query("", f"({bbox})"))
+        print(
+            f"Filialen im Bereich {bbox} abfragen"
+            f" ({', '.join(brand.label for brand in brands)}, dauert einige Minuten)",
+            flush=True,
+        )
+        payload = overpass(store_query("", f"({bbox})", brands))
 
     rows = []
+    counts: dict[str, int] = {}
     for element in payload.get("elements", []):
         point = element_point(element)
         tags = element.get("tags") or {}
-        if not point or not is_burger_king(tags):
+        if not point:
             continue
+        brand = next((item for item in brands if matches_brand(tags, item)), None)
+        if brand is None:
+            continue
+        counts[brand.label] = counts.get(brand.label, 0) + 1
         rows.append(
             (
                 f"{element.get('type', 'node')}/{element.get('id')}",
+                brand.key,
                 point[0],
                 point[1],
                 tags.get("name") or tags.get("brand"),
@@ -223,18 +246,19 @@ def load_burgers(
         )
 
     connection.executemany(
-        "INSERT OR REPLACE INTO burger (id, lat, lon, name, address, opening_hours, tags)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     connection.commit()
-    print(f"  {len(rows)} Filialen gespeichert", flush=True)
+    summary = ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
+    print(f"  {len(rows)} Filialen gespeichert ({summary})", flush=True)
     return len(rows)
 
 
 def load_chargers(connection: sqlite3.Connection, resume: bool) -> int:
-    burgers = connection.execute("SELECT id, lat, lon FROM burger ORDER BY id").fetchall()
-    blocks = list(chunked(burgers, BURGERS_PER_BLOCK))
+    stores = connection.execute("SELECT id, lat, lon FROM store ORDER BY id").fetchall()
+    blocks = list(chunked(stores, STORES_PER_BLOCK))
     done = (
         {row["block"] for row in connection.execute("SELECT block FROM ingest_block")}
         if resume
@@ -244,7 +268,7 @@ def load_chargers(connection: sqlite3.Connection, resume: bool) -> int:
         connection.execute("DELETE FROM ingest_block")
         connection.commit()
 
-    print(f"Ladesaeulen um {len(burgers)} Filialen, {len(blocks)} Bloecke", flush=True)
+    print(f"Ladesaeulen um {len(stores)} Filialen, {len(blocks)} Bloecke", flush=True)
     for index, block in enumerate(blocks):
         if index in done:
             continue
@@ -298,7 +322,7 @@ def load_chargers(connection: sqlite3.Connection, resume: bool) -> int:
 def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
     """Paare einmal ausrechnen, damit die Abfrage spaeter nur noch lesen muss."""
     connection.execute("DELETE FROM pair")
-    burgers = connection.execute("SELECT id, lat, lon FROM burger").fetchall()
+    stores = connection.execute("SELECT id, lat, lon FROM store").fetchall()
     chargers = connection.execute("SELECT id, lat, lon FROM charger").fetchall()
 
     # Raster ueber die Ladesaeulen, damit nicht jede Filiale gegen alle geprueft wird.
@@ -309,18 +333,18 @@ def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
         grid.setdefault(key, []).append(charger)
 
     rows = []
-    for burger in burgers:
-        base_lat = int(burger["lat"] / cell)
-        base_lon = int(burger["lon"] / cell)
+    for store in stores:
+        base_lat = int(store["lat"] / cell)
+        base_lon = int(store["lon"] / cell)
         for d_lat in (-1, 0, 1):
             for d_lon in (-1, 0, 1):
                 for charger in grid.get((base_lat + d_lat, base_lon + d_lon), ()):
-                    gap = haversine_m(burger["lat"], burger["lon"], charger["lat"], charger["lon"])
+                    gap = haversine_m(store["lat"], store["lon"], charger["lat"], charger["lon"])
                     if gap <= gap_m:
-                        rows.append((burger["id"], charger["id"], gap))
+                        rows.append((store["id"], charger["id"], gap))
 
     connection.executemany(
-        "INSERT OR REPLACE INTO pair (burger_id, charger_id, gap_m) VALUES (?, ?, ?)", rows
+        "INSERT OR REPLACE INTO pair (store_id, charger_id, gap_m) VALUES (?, ?, ?)", rows
     )
     connection.commit()
     print(f"  {len(rows)} Paare bis {gap_m:.0f} m", flush=True)
@@ -328,10 +352,10 @@ def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
 
 
 def build_index(connection: sqlite3.Connection) -> None:
-    connection.execute("DELETE FROM burger_rtree")
+    connection.execute("DELETE FROM store_rtree")
     connection.execute(
-        "INSERT INTO burger_rtree (rowid, min_lat, max_lat, min_lon, max_lon)"
-        " SELECT b.rowid, b.lat, b.lat, b.lon, b.lon FROM burger b"
+        "INSERT INTO store_rtree (rowid, min_lat, max_lat, min_lon, max_lon)"
+        " SELECT s.rowid, s.lat, s.lat, s.lon, s.lon FROM store s"
     )
     connection.commit()
 
@@ -358,17 +382,27 @@ def main() -> int:
         help="ISO-3166-1-Code statt Bounding-Box. Braucht eine Instanz mit Area-Daten,"
         " sonst wird automatisch auf die Bounding-Box zurueckgefallen.",
     )
-    parser.add_argument("--burgers-json", type=Path, default=None, help="Overpass-Antwort wiederverwenden")
+    parser.add_argument("--stores-json", type=Path, default=None, help="Overpass-Antwort wiederverwenden")
+    parser.add_argument(
+        "--brands",
+        default=",".join(BRANDS),
+        help="Kommaliste der Ketten. Der Ingest holt immer alle, ausgewaehlt wird spaeter"
+        f" in der App. Moeglich: {', '.join(BRANDS)}",
+    )
     parser.add_argument("--gap", type=float, default=1000.0, help="Maximaler Abstand fuer Paare in Metern")
     parser.add_argument("--no-resume", action="store_true", help="Ladesaeulen komplett neu holen")
     parser.add_argument("--pairs-only", action="store_true", help="Nur Paare und Index neu bauen")
     arguments = parser.parse_args()
 
+    brands = [BRANDS[key.strip()] for key in arguments.brands.split(",") if key.strip() in BRANDS]
+    if not brands:
+        parser.error(f"Keine bekannte Kette in --brands. Moeglich: {', '.join(BRANDS)}")
+
     connection = connect(Path(arguments.db))
     started = time.time()
 
     if not arguments.pairs_only:
-        load_burgers(connection, arguments.bbox, arguments.country, arguments.burgers_json)
+        load_stores(connection, arguments.bbox, arguments.country, arguments.stores_json, brands)
         load_chargers(connection, resume=not arguments.no_resume)
 
     print("Paare berechnen", flush=True)
@@ -377,13 +411,19 @@ def main() -> int:
 
     counts = {
         name: connection.execute(f"SELECT COUNT(*) AS n FROM {name}").fetchone()["n"]
-        for name in ("burger", "charger")
+        for name in ("store", "charger")
+    }
+    per_brand = {
+        row["brand"]: row["n"]
+        for row in connection.execute("SELECT brand, COUNT(*) AS n FROM store GROUP BY brand")
     }
     set_meta(
         connection,
         ingested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         area=arguments.country or f"bbox {arguments.bbox}",
-        burgers=counts["burger"],
+        brands=",".join(brand.key for brand in brands),
+        stores=counts["store"],
+        stores_per_brand=json.dumps(per_brand),
         chargers=counts["charger"],
         pairs=pairs,
         max_gap_m=arguments.gap,
@@ -392,7 +432,7 @@ def main() -> int:
     )
     print(
         f"Fertig in {time.time() - started:.0f}s: "
-        f"{counts['burger']} Filialen, {counts['charger']} Saeulen, {pairs} Paare",
+        f"{counts['store']} Filialen, {counts['charger']} Saeulen, {pairs} Paare",
         flush=True,
     )
     return 0

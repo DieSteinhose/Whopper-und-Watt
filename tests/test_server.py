@@ -44,6 +44,24 @@ class GeoTest(unittest.TestCase):
         self.assertAlmostEqual(48.0 - south, north - 48.0, places=9)
         self.assertAlmostEqual(9.0 - west, east - 9.0, places=9)
 
+    def test_brand_detection(self):
+        subway = geo.BRANDS["subway"]
+        burger_king = geo.BRANDS["bk"]
+        self.assertTrue(geo.matches_brand({"brand:wikidata": "Q244457"}, subway))
+        self.assertTrue(geo.matches_brand({"amenity": "fast_food", "name": "Subway"}, subway))
+        self.assertFalse(geo.matches_brand({"amenity": "fast_food", "name": "Subway"}, burger_king))
+        # Ohne Wikidata-Treffer zaehlt der Name nur bei Essensschuppen: ein
+        # U-Bahn-Zugang namens "Subway" ist keine Filiale.
+        self.assertFalse(geo.matches_brand({"railway": "subway_entrance", "name": "Subway"}, subway))
+        self.assertEqual(geo.brand_of({"brand:wikidata": "Q177054"}), burger_king)
+        self.assertIsNone(geo.brand_of({"amenity": "fast_food", "name": "Nordsee"}))
+
+    def test_brand_parsing_falls_back_to_the_default(self):
+        self.assertEqual([b.key for b in geo.parse_brands("subway")], ["subway"])
+        self.assertEqual([b.key for b in geo.parse_brands("bk,subway")], ["bk", "subway"])
+        self.assertEqual([b.key for b in geo.parse_brands("")], list(geo.DEFAULT_BRANDS))
+        self.assertEqual([b.key for b in geo.parse_brands("mcdonalds")], list(geo.DEFAULT_BRANDS))
+
     def test_enbw_detection(self):
         self.assertTrue(geo.is_enbw({"operator": "EnBW mobility+"}))
         self.assertTrue(geo.is_enbw({"network": "enbw"}))
@@ -90,15 +108,17 @@ class DatabaseTest(unittest.TestCase):
         path = Path(cls._directory.name) / "test.sqlite"
         connection = ingest.connect(path)
 
-        burgers = [
-            ("node/1", *BK_ECHTERDINGEN, "Burger King", "Echterdinger Straße", "24/7"),
-            ("node/2", 48.7758, 9.1829, "Burger King", "Stuttgart Mitte", "Mo-Su 10:00-22:00"),
-            ("node/3", 52.5200, 13.4050, "Burger King", "Berlin", None),
+        stores = [
+            ("node/1", "bk", *BK_ECHTERDINGEN, "Burger King", "Echterdinger Straße", "24/7"),
+            ("node/2", "bk", 48.7758, 9.1829, "Burger King", "Stuttgart Mitte", "Mo-Su 10:00-22:00"),
+            ("node/3", "bk", 52.5200, 13.4050, "Burger King", "Berlin", None),
+            # Subway direkt neben Filiale 1, an derselben Ladesaeule.
+            ("node/4", "subway", 48.69195, 9.1946, "Subway", "Echterdingen", "Mo-Su 09:00-21:00"),
         ]
         connection.executemany(
-            "INSERT INTO burger (id, lat, lon, name, address, opening_hours, tags)"
-            " VALUES (?, ?, ?, ?, ?, ?, '{}')",
-            burgers,
+            "INSERT INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
+            stores,
         )
         # Saeule 1: EnBW, 50 m neben Filiale 1. Saeule 2: fremd, 60 m neben Filiale 2.
         connection.executemany(
@@ -120,28 +140,59 @@ class DatabaseTest(unittest.TestCase):
         cls._directory.cleanup()
 
     def test_radius_search_finds_only_nearby(self):
-        spots = self.database.spots_near(*BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, only_enbw=True)
+        spots = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, only_enbw=True, brands=["bk"]
+        )
         self.assertEqual([spot["id"] for spot in spots], ["node/1"])
         self.assertEqual(spots[0]["chargers"][0]["gapM"], 50)
         self.assertEqual(spots[0]["distanceM"], 0)
 
     def test_enbw_filter_hides_foreign_operators(self):
         near_stuttgart = (48.7758, 9.1829)
-        only_enbw = self.database.spots_near(*near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=True)
-        everyone = self.database.spots_near(*near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=False)
+        only_enbw = self.database.spots_near(
+            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=True, brands=["bk"]
+        )
+        everyone = self.database.spots_near(
+            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=False, brands=["bk"]
+        )
         self.assertEqual(only_enbw, [])
         self.assertEqual([spot["id"] for spot in everyone], ["node/2"])
 
     def test_gap_filter(self):
-        spots = self.database.spots_near(*BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, only_enbw=True)
+        spots = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, only_enbw=True, brands=["bk"]
+        )
         self.assertEqual(spots, [])
+
+    def test_brand_selection(self):
+        """Burger King ist Standard, Subway waehlbar, beides zusammen moeglich."""
+        def ids(brands):
+            return [
+                spot["id"]
+                for spot in self.database.spots_near(
+                    *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, brands=brands
+                )
+            ]
+
+        self.assertEqual(ids(["bk"]), ["node/1"])
+        self.assertEqual(ids(["subway"]), ["node/4"])
+        self.assertEqual(sorted(ids(["bk", "subway"])), ["node/1", "node/4"])
+        # Ohne Kette gibt es nichts, und das darf kein Fehler sein.
+        self.assertEqual(ids([]), [])
+
+    def test_brand_label_travels_with_the_spot(self):
+        spot = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, brands=["subway"]
+        )[0]
+        self.assertEqual(spot["brand"], "subway")
+        self.assertEqual(spot["brandLabel"], "Subway")
 
     def test_route_search_sorts_by_progress_and_skips_far_away(self):
         # Strecke Echterdingen -> Stuttgart Mitte, Berlin liegt weit daneben.
         points = [BK_ECHTERDINGEN, (48.7758, 9.1829)]
         seconds = [0.0, 900.0]
         spots = self.database.spots_along_route(
-            points=points, seconds=seconds, corridor_m=2000, gap_m=300, only_enbw=False
+            points=points, seconds=seconds, corridor_m=2000, gap_m=300, only_enbw=False, brands=["bk"]
         )
         self.assertEqual([spot["id"] for spot in spots], ["node/1", "node/2"])
         self.assertLess(spots[0]["routeProgressM"], spots[1]["routeProgressM"])
@@ -151,7 +202,7 @@ class DatabaseTest(unittest.TestCase):
     def test_route_corridor_excludes_detours(self):
         points = [(48.60, 9.19), (48.66, 9.19)]  # endet vor Echterdingen
         spots = self.database.spots_along_route(
-            points=points, seconds=None, corridor_m=1000, gap_m=300, only_enbw=False
+            points=points, seconds=None, corridor_m=1000, gap_m=300, only_enbw=False, brands=["bk"]
         )
         self.assertEqual(spots, [])
 
@@ -252,8 +303,8 @@ class IngestTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             connection = ingest.connect(Path(directory) / "pairs.sqlite")
             connection.execute(
-                "INSERT INTO burger (id, lat, lon, name, address, opening_hours, tags)"
-                " VALUES ('node/1', 48.0, 9.0, 'BK', NULL, NULL, '{}')"
+                "INSERT INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
+                " VALUES ('node/1', 'bk', 48.0, 9.0, 'BK', NULL, NULL, '{}')"
             )
             connection.executemany(
                 "INSERT INTO charger (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
@@ -294,7 +345,9 @@ class IngestTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as directory:
                 connection = ingest.connect(Path(directory) / "fallback.sqlite")
-                count = ingest.load_burgers(connection, "47.2,5.8,55.1,15.1", "DE", None)
+                count = ingest.load_stores(
+                    connection, "47.2,5.8,55.1,15.1", "DE", None, [geo.BRANDS["bk"]]
+                )
         finally:
             ingest.overpass = original
 
@@ -322,10 +375,10 @@ class IngestTest(unittest.TestCase):
             seed.write_text(json.dumps(payload))
             for _ in range(2):
                 connection = ingest.connect(path)
-                ingest.load_burgers(connection, ingest.GERMANY_BBOX, None, seed)
+                ingest.load_stores(connection, ingest.GERMANY_BBOX, None, seed, [geo.BRANDS["bk"]])
                 connection.close()
             connection = sqlite3.connect(path)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM burger").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM store").fetchone()[0], 1)
 
 
 if __name__ == "__main__":

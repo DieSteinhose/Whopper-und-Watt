@@ -33,6 +33,8 @@ async function pickBackend() {
 
 const state = {
   mode: 'radius',
+  // Burger King ist voreingestellt, Subway waehlt man dazu. Beide sind abwaehlbar.
+  brands: ['bk'],
   radiusKm: 25,
   corridorM: 3000,
   gapM: 300,
@@ -45,6 +47,7 @@ const state = {
   searched: false,
   tab: 'list',
   queryMs: null,
+  rerun: null,
 };
 
 const view = {
@@ -56,6 +59,7 @@ const view = {
   optionsToggle: document.getElementById('optionsToggle'),
   radiusForm: document.getElementById('radiusForm'),
   routeForm: document.getElementById('routeForm'),
+  brandChips: document.getElementById('brandChips'),
   radiusChips: document.getElementById('radiusChips'),
   corridorChips: document.getElementById('corridorChips'),
   departureLabel: document.getElementById('departureLabel'),
@@ -103,6 +107,35 @@ function setBanner(message) {
   view.banner.hidden = !message;
 }
 
+const BRAND_LABELS = { bk: 'Burger King', subway: 'Subway' };
+const BRAND_GLYPHS = { bk: '🍔', subway: '🥪' };
+
+/** "952 Burger King, 787 Subway", oder schlicht die Gesamtzahl. */
+function describeStock(meta) {
+  try {
+    const perBrand = JSON.parse(meta.stores_per_brand ?? '{}');
+    const parts = Object.entries(perBrand).map(([key, count]) => `${count} ${BRAND_LABELS[key] ?? key}`);
+    if (parts.length) return parts.join(', ');
+  } catch {
+    // Ein kaputter Zaehler ist kein Grund, den Tooltip zu verlieren.
+  }
+  return `${meta.stores ?? '?'} Filialen`;
+}
+
+function brandLabels() {
+  const chosen = state.brands.map((key) => BRAND_LABELS[key] ?? key);
+  if (chosen.length === 0) return 'Keine Kette';
+  return chosen.join(' und ');
+}
+
+// Ohne ausgewaehlte Kette gibt es nichts zu suchen. Das ist ein erlaubter
+// Zustand, denn beide Ketten sollen abwaehlbar sein, aber er braucht eine Ansage.
+function requireBrand() {
+  if (state.brands.length === 0) {
+    throw new Error('Keine Kette ausgewählt. Burger King oder Subway antippen.');
+  }
+}
+
 function pressed(container, attribute, value) {
   container.querySelectorAll(`[${attribute}]`).forEach((button) => {
     button.setAttribute('aria-pressed', String(button.getAttribute(attribute) === String(value)));
@@ -113,6 +146,7 @@ function pressed(container, attribute, value) {
 
 function searchParams() {
   return {
+    brands: state.brands,
     radiusKm: state.radiusKm,
     corridorM: state.corridorM,
     gapM: state.gapM,
@@ -123,6 +157,7 @@ function searchParams() {
 async function searchRadius() {
   const query = view.placeInput.value.trim();
   await withLoading(async () => {
+    requireBrand();
     let center;
     if (query) {
       center = await backend.geocode(query);
@@ -130,16 +165,28 @@ async function searchRadius() {
       const position = await currentPosition();
       center = { lat: position.coords.latitude, lon: position.coords.longitude, label: 'Mein Standort' };
     }
-    const result = await backend.radiusSearch(center, searchParams());
-    state.center = center;
-    state.route = null;
-    state.spots = result.spots;
-    state.queryMs = result.queryMs;
+    await runRadius(center);
+  });
+}
+
+// Getrennt von der Eingabe, damit ein Filterwechsel die Suche wiederholen kann,
+// ohne Ort und Route erneut aufzuloesen. Bei einer geladenen GPX-Route gibt es
+// gar keine Eingabefelder mehr, aus denen sich das rekonstruieren liesse.
+async function runRadius(center) {
+  const result = await backend.radiusSearch(center, searchParams());
+  state.center = center;
+  state.route = null;
+  state.spots = result.spots;
+  state.queryMs = result.queryMs;
+  state.rerun = () => withLoading(async () => {
+    requireBrand();
+    await runRadius(center);
   });
 }
 
 async function searchRoute(waypoints, label) {
   await withLoading(async () => {
+    requireBrand();
     const request = {};
     if (waypoints) {
       request.waypoints = waypoints;
@@ -157,15 +204,29 @@ async function searchRoute(waypoints, label) {
         request.label = `Mein Standort nach ${target.label}`;
       }
     }
-    const result = await backend.routeSearch(request, searchParams());
-    state.route = result.route;
-    state.center = null;
-    state.spots = result.spots;
-    state.queryMs = result.queryMs;
-    if (!result.route.hasMeasuredDurations) {
-      setBanner('Für diese Route liegen keine Fahrzeiten vor, die Ankunftszeiten sind geschätzt.');
-    }
+    await runRoute(request);
   });
+}
+
+async function runRoute(request) {
+  const result = await backend.routeSearch(request, searchParams());
+  state.route = result.route;
+  state.center = null;
+  state.spots = result.spots;
+  state.queryMs = result.queryMs;
+  state.rerun = () => withLoading(async () => {
+    requireBrand();
+    await runRoute(request);
+  });
+  if (!result.route.hasMeasuredDurations) {
+    setBanner('Für diese Route liegen keine Fahrzeiten vor, die Ankunftszeiten sind geschätzt.');
+  }
+}
+
+/** Filterwechsel nach einer Suche: dieselbe Suche noch einmal, mit neuen Werten. */
+function rerunIfSearched() {
+  if (state.searched && state.rerun) state.rerun();
+  else renderStatus();
 }
 
 async function withLoading(task) {
@@ -215,7 +276,7 @@ function renderStatus() {
     return;
   }
   if (!state.searched) {
-    view.status.textContent = 'Burger King neben der Ladesäule';
+    view.status.textContent = `${brandLabels()} neben der Ladesäule`;
     return;
   }
   const where = state.route ? state.route.label : (state.center?.label ?? '');
@@ -229,7 +290,7 @@ function renderList() {
     return;
   }
   if (!state.searched) {
-    view.list.innerHTML = '<div class="empty"><strong>Laden und Whopper in einem Stopp</strong>' +
+    view.list.innerHTML = '<div class="empty"><strong>Laden und Essen in einem Stopp</strong>' +
       'Umkreis: Ort eingeben oder Standort freigeben. Route: Start und Ziel eintippen, oder einen Plan laden.</div>';
     return;
   }
@@ -275,7 +336,7 @@ function card(spot, now) {
         ${details.length ? `<p class="details">${escapeHtml(details.join(' · '))}</p>` : ''}
       </div>
       <div class="actions">
-        <a href="geo:${spot.lat},${spot.lon}?q=${spot.lat},${spot.lon}(${encodeURIComponent(spot.name)})">Zum BK</a>
+        <a href="geo:${spot.lat},${spot.lon}?q=${spot.lat},${spot.lon}(${encodeURIComponent(spot.name)})">Zur Filiale</a>
         ${charger ? `<a href="geo:${charger.lat},${charger.lon}?q=${charger.lat},${charger.lon}(Ladesäule)">Zur Säule</a>` : ''}
         <a href="${spot.osmUrl}" target="_blank" rel="noreferrer">OSM</a>
       </div>
@@ -350,8 +411,14 @@ function renderMap() {
         .addTo(layer);
       bounds.push([item.lat, item.lon]);
     });
-    L.marker([spot.lat, spot.lon], { icon: pin(closed ? 'bk-closed' : 'bk', '🍔'), zIndexOffset: 1000 })
-      .bindPopup(`<strong>${escapeHtml(spot.name)}</strong><br>${escapeHtml(describeOpen(open, arrivalOf(spot)))}`)
+    L.marker([spot.lat, spot.lon], {
+      icon: pin(closed ? 'store-closed' : `store ${spot.brand ?? 'bk'}`, BRAND_GLYPHS[spot.brand] ?? '🍔'),
+      zIndexOffset: 1000,
+    })
+      .bindPopup(
+        `<strong>${escapeHtml(spot.name)}</strong>` +
+        `<br>${escapeHtml(describeOpen(open, arrivalOf(spot)))}`,
+      )
       .addTo(layer);
     bounds.push([spot.lat, spot.lon]);
   });
@@ -422,12 +489,24 @@ document.getElementById('gapChips').addEventListener('click', (event) => {
   if (value) {
     state.gapM = Number(value);
     pressed(document.getElementById('gapChips'), 'data-gap', value);
+    rerunIfSearched();
   }
+});
+
+view.brandChips.addEventListener('click', (event) => {
+  const key = event.target.dataset?.brand;
+  if (!key) return;
+  state.brands = state.brands.includes(key)
+    ? state.brands.filter((item) => item !== key)
+    : [...state.brands, key];
+  event.target.setAttribute('aria-pressed', String(state.brands.includes(key)));
+  rerunIfSearched();
 });
 
 document.getElementById('enbwChip').addEventListener('click', (event) => {
   state.onlyEnbw = !state.onlyEnbw;
   event.target.setAttribute('aria-pressed', String(state.onlyEnbw));
+  rerunIfSearched();
 });
 
 document.getElementById('departureChips').addEventListener('click', (event) => {
@@ -523,7 +602,7 @@ pickBackend()
   .then((meta) => {
     const source = backend.mode === 'server' ? 'Server' : 'im Browser';
     view.status.title =
-      `${meta.burgers} Filialen, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare` +
+      `${describeStock(meta)}, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare` +
       `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at} · Suche ${source}`;
   })
   .catch(() => setBanner('Kein Datenbestand erreichbar. Angezeigt wird, was im Cache liegt.'));

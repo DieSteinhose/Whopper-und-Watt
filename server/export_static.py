@@ -23,6 +23,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from geo import BRANDS  # noqa: E402
+
 
 def export(db_path: Path, out_path: Path) -> dict:
     connection = sqlite3.connect(db_path)
@@ -30,13 +32,13 @@ def export(db_path: Path, out_path: Path) -> dict:
 
     chargers: dict[str, list[dict]] = {}
     query = (
-        "SELECT p.burger_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.is_enbw,"
+        "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.is_enbw,"
         " c.power_kw, c.capacity, c.fee"
         " FROM pair p JOIN charger c ON c.id = p.charger_id"
-        " ORDER BY p.burger_id, p.gap_m"
+        " ORDER BY p.store_id, p.gap_m"
     )
     for row in connection.execute(query):
-        chargers.setdefault(row["burger_id"], []).append(
+        chargers.setdefault(row["store_id"], []).append(
             {
                 "id": row["id"],
                 "lat": round(row["lat"], 6),
@@ -51,16 +53,19 @@ def export(db_path: Path, out_path: Path) -> dict:
         )
 
     spots = []
-    for row in connection.execute("SELECT * FROM burger ORDER BY id"):
+    for row in connection.execute("SELECT * FROM store ORDER BY id"):
         near = chargers.get(row["id"])
         if not near:
             continue  # Filiale ohne Saeule beantwortet die Frage nicht.
+        brand = BRANDS.get(row["brand"])
         spots.append(
             {
                 "id": row["id"],
+                "brand": row["brand"],
+                "brandLabel": brand.label if brand else row["brand"],
                 "lat": round(row["lat"], 6),
                 "lon": round(row["lon"], 6),
-                "name": row["name"] or "Burger King",
+                "name": row["name"] or (brand.label if brand else "Filiale"),
                 "address": row["address"],
                 "openingHours": row["opening_hours"],
                 "chargers": near,

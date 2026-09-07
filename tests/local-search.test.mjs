@@ -29,7 +29,7 @@ const { localBackend, parseGpx, isAddress, isPlaceholder, columnAFromSheet, thin
 
 const DORTMUND = { lat: 51.5142, lon: 7.4653 };
 const STUTTGART = { lat: 48.7758, lon: 9.1829 };
-const params = { radiusKm: 25, corridorM: 3000, gapM: 300, onlyEnbw: true };
+const params = { brands: ['bk'], radiusKm: 25, corridorM: 3000, gapM: 300, onlyEnbw: true };
 
 // Eine gerade Linie reicht: geprueft wird die Auswahllogik, nicht der Router.
 function straightRoute(from, to, steps = 200) {
@@ -141,4 +141,30 @@ test('Ausduennen behaelt Anfang und Ende', () => {
   assert.equal(thinned.length, 20);
   assert.deepEqual(thinned[0], points[0]);
   assert.deepEqual(thinned[19], points[99]);
+});
+
+test('Ketten sind einzeln waehlbar und kombinierbar', { skip: !dataAvailable }, async () => {
+  const wide = { ...params, radiusKm: 100, onlyEnbw: false };
+  const burgerKing = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['bk'] });
+  const subway = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['subway'] });
+  const both = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['bk', 'subway'] });
+
+  assert.ok(burgerKing.spots.length > 0, 'kein Burger King im 100-km-Umkreis');
+  assert.ok(subway.spots.length > 0, 'kein Subway im 100-km-Umkreis');
+  assert.ok(burgerKing.spots.every((spot) => spot.brand === 'bk'));
+  assert.ok(subway.spots.every((spot) => spot.brand === 'subway'));
+  // Zusammen ist genau die Vereinigung, ohne Doppelte.
+  assert.equal(both.spots.length, burgerKing.spots.length + subway.spots.length);
+  assert.equal(new Set(both.spots.map((spot) => spot.id)).size, both.spots.length);
+});
+
+test('Burger King ist abwaehlbar, ohne Kette gibt es nichts', { skip: !dataAvailable }, async () => {
+  const none = await localBackend.radiusSearch(DORTMUND, { ...params, brands: [] });
+  assert.equal(none.spots.length, 0);
+});
+
+test('Auch entlang der Route wirkt die Kettenauswahl', { skip: !dataAvailable }, async () => {
+  const route = straightRoute(DORTMUND, STUTTGART);
+  const subway = await localBackend.spotsAlongRoute(route, { ...params, brands: ['subway'], onlyEnbw: false });
+  assert.ok(subway.every((spot) => spot.brand === 'subway'));
 });

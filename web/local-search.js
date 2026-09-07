@@ -41,6 +41,13 @@ function usableChargers(spot, gapM, onlyEnbw) {
   );
 }
 
+// Ohne Angabe bleibt es bei der Voreinstellung des Datenbestands, sonst waere
+// eine alte gespeicherte Auswahl schlimmer als gar keine.
+function wantedBrand(spot, brands) {
+  if (!brands || brands.length === 0) return false;
+  return brands.includes(spot.brand ?? 'bk');
+}
+
 export const localBackend = {
   mode: 'local',
 
@@ -55,6 +62,7 @@ export const localBackend = {
     const radiusM = params.radiusKm * 1000;
     const spots = [];
     for (const spot of data.spots) {
+      if (!wantedBrand(spot, params.brands)) continue;
       const distance = haversineM(center.lat, center.lon, spot.lat, spot.lon);
       if (distance > radiusM) continue;
       const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);
@@ -99,6 +107,7 @@ export const localBackend = {
 
     const spots = [];
     for (const spot of data.spots) {
+      if (!wantedBrand(spot, params.brands)) continue;
       const match = routeMatch(thin.points, cumulative, thin.seconds, spot.lat, spot.lon);
       if (match.offsetM > params.corridorM) continue;
       const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);

@@ -4,13 +4,39 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 EARTH_RADIUS_M = 6371008.8
 METERS_PER_DEGREE_LAT = 111_320.0
 
-# Wikidata-Objekt der Marke Burger King, in OSM als brand:wikidata gepflegt.
-BURGER_KING_WIKIDATA = "Q177054"
+
+@dataclass(frozen=True)
+class Brand:
+    """Eine Kette, wie sie in OSM auffindbar ist.
+
+    Der Anker ist brand:wikidata, denn das ist eindeutig und gut gepflegt: in
+    der Stichprobe trugen alle 49 Subway-Filialen im Ruhrgebiet und 22 von 23
+    Burger King im Raum Stuttgart dieses Tag. Die Namensfelder fangen den Rest.
+    """
+
+    key: str
+    label: str
+    wikidata: str
+    names: tuple[str, ...]
+
+
+BRANDS: dict[str, Brand] = {
+    "bk": Brand("bk", "Burger King", "Q177054", ("Burger King",)),
+    "subway": Brand("subway", "Subway", "Q244457", ("Subway",)),
+}
+
+# Burger King ist die Voreinstellung, alles andere waehlt man dazu.
+DEFAULT_BRANDS = ("bk",)
+
+# Ohne Wikidata-Treffer wird der Name nur bei Essensschuppen geglaubt. Sonst
+# waere jeder U-Bahn-Zugang namens "Subway" eine Filiale.
+FOOD_AMENITIES = frozenset({"fast_food", "restaurant", "cafe"})
 
 # EnBW als Betreiber: die Schreibweisen in OSM sind uneinheitlich.
 _ENBW_KEYS = ("operator", "network", "brand", "owner", "name", "operator:short")
@@ -57,13 +83,30 @@ def is_enbw(tags: dict) -> bool:
     return False
 
 
-def is_burger_king(tags: dict) -> bool:
-    if tags.get("brand:wikidata") == BURGER_KING_WIKIDATA:
+def matches_brand(tags: dict, brand: Brand) -> bool:
+    if tags.get("brand:wikidata") == brand.wikidata:
         return True
+    if tags.get("amenity") not in FOOD_AMENITIES:
+        return False
     haystack = " ".join(
         filter(None, (tags.get("brand"), tags.get("name"), tags.get("operator")))
     ).lower()
-    return "burger king" in haystack
+    return any(name.lower() in haystack for name in brand.names)
+
+
+def brand_of(tags: dict) -> Brand | None:
+    """Erste passende Marke, oder None."""
+    for brand in BRANDS.values():
+        if matches_brand(tags, brand):
+            return brand
+    return None
+
+
+def parse_brands(raw: str | None) -> list[Brand]:
+    """Kommaliste von Markenschluesseln, unbekannte werden ignoriert."""
+    keys = [key.strip().lower() for key in (raw or "").split(",") if key.strip()]
+    chosen = [BRANDS[key] for key in keys if key in BRANDS]
+    return chosen or [BRANDS[key] for key in DEFAULT_BRANDS]
 
 
 _POWER_VALUE = re.compile(r"[0-9]+(\.[0-9]+)?")

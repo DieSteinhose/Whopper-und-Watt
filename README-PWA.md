@@ -4,6 +4,17 @@ Dieselbe Frage wie die Android-App, andere Bauform: **Wo steht eine Ladesäule d
 einem Burger King?** Diesmal als installierbare Web-App mit eigenem Server und eigener
 Datenbank, statt bei jeder Suche live gegen OpenStreetMap zu fragen.
 
+Inzwischen sind es zwei Ketten: **Burger King ist voreingestellt, Subway lässt sich dazu- oder
+stattdessen anwählen**, und beide sind abwählbar. Eine Kette ist im Code eine Datenstruktur
+(`server/geo.py`, `BRANDS`) mit Wikidata-Objekt und Namensvarianten, keine fest verdrahtete
+Bedingung. Eine dritte Kette ist damit ein Eintrag in dieser Tabelle plus ein Knopf im HTML.
+
+Der Anker ist `brand:wikidata`, denn das ist eindeutig und gut gepflegt: in der Stichprobe
+trugen alle 49 Subway-Filialen im Ruhrgebiet und 22 von 23 Burger King im Raum Stuttgart
+dieses Tag. Ohne Wikidata-Treffer wird ein passender Name nur bei `amenity=fast_food`,
+`restaurant` oder `cafe` geglaubt, sonst wäre jeder U-Bahn-Zugang namens "Subway" eine
+Filiale.
+
 ## Warum überhaupt ein Server
 
 Die Android-App fragt Overpass zur Laufzeit. Das war der Flaschenhals, gemessen über mehrere
@@ -21,9 +32,10 @@ Browser (PWA)          Server (Python, nur Standardbibliothek)      einmalig
 
 ## Datenbank
 
-`server/ingest.py` baut sie in zwei Schritten, weil Burger King selten und Ladesäulen häufig sind:
+`server/ingest.py` baut sie in zwei Schritten, weil Filialen selten und Ladesäulen häufig sind:
 
-1. Alle Filialen im Suchbereich, eine Abfrage über eine Bounding-Box.
+1. Alle Filialen aller bekannten Ketten im Suchbereich, eine Abfrage über eine Bounding-Box.
+   Der Ingest holt immer alle Ketten, ausgewählt wird erst in der App.
 2. Ladesäulen in 1-km-Boxen um genau diese Filialen, in Blöcken zu 20.
 
 **Warum Bounding-Box und nicht Landesfläche:** die naheliegendere Abfrage
@@ -65,7 +77,7 @@ ausgegeben.
 | Endpunkt | Zweck |
 |---|---|
 | `GET /api/meta` | Bestand und Stand der Datenbank |
-| `GET /api/spots?lat&lon&radius_km&gap_m&only_enbw` | Umkreissuche |
+| `GET /api/spots?lat&lon&radius_km&gap_m&only_enbw&brands` | Umkreissuche, `brands` als Kommaliste (`bk`, `subway`) |
 | `POST /api/route-spots` | Route aus Adressen oder Wegpunkten, plus Treffer im Korridor |
 | `GET /api/geocode?q=` | Ortssuche über Nominatim, mit Cache und 1 Anfrage pro Sekunde |
 | `POST /api/plan?name=` | GPX oder ABRP-Excel hochladen, ergibt Wegpunkte |

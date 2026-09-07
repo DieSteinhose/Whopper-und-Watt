@@ -15,7 +15,7 @@
   <header class="bar">
     <div>
       <h1>Whopper &amp; Watt</h1>
-      <p id="status">Burger King neben der Ladesäule</p>
+      <p id="status">Fastfood neben der Ladesäule</p>
     </div>
     <button id="installButton" class="ghost" hidden>Installieren</button>
   </header>
@@ -41,6 +41,12 @@
     </form>
 
     <div id="options">
+      <div class="row chips" id="brandChips">
+        <span class="label">Kette</span>
+        <button class="chip" data-brand="bk" aria-pressed="true">Burger King</button>
+        <button class="chip" data-brand="subway" aria-pressed="false">Subway</button>
+      </div>
+
       <div class="row chips" id="radiusChips">
         <span class="label">Umkreis</span>
         <button class="chip" data-radius="10">10 km</button>

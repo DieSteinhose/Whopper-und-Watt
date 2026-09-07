@@ -241,8 +241,9 @@ main {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   font-size: 13px;
 }
-.pin.bk { background: #c4451e; }
-.pin.bk-closed { background: #8e8e93; }
+.pin.store.bk { background: #c4451e; }
+.pin.store.subway { background: #157a3c; }
+.pin.store-closed { background: #8e8e93; }
 .pin.charger { background: #1b8a4c; }
 
 .leaflet-container { background: var(--bg); }

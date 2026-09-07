@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Sequence
 
 from geo import (
+    BRANDS,
+    DEFAULT_BRANDS,
     box_around,
     cumulative_distances,
     haversine_m,
@@ -48,19 +50,20 @@ class SpotDatabase:
         radius_m: float,
         gap_m: float,
         only_enbw: bool,
+        brands: Sequence[str] = DEFAULT_BRANDS,
     ) -> list[dict]:
         south, west, north, east = box_around(lat, lon, radius_m)
-        burgers = self._burgers_in_box(south, west, north, east)
+        stores = self._stores_in_box(south, west, north, east, brands)
 
         spots = []
-        for burger in burgers:
-            distance = haversine_m(lat, lon, burger["lat"], burger["lon"])
+        for store in stores:
+            distance = haversine_m(lat, lon, store["lat"], store["lon"])
             if distance > radius_m:
                 continue
-            chargers = self._chargers_for(burger["id"], gap_m, only_enbw)
+            chargers = self._chargers_for(store["id"], gap_m, only_enbw)
             if not chargers:
                 continue
-            spot = self._spot(burger, chargers)
+            spot = self._spot(store, chargers)
             spot["distanceM"] = round(distance)
             spots.append(spot)
 
@@ -76,6 +79,7 @@ class SpotDatabase:
         corridor_m: float,
         gap_m: float,
         only_enbw: bool,
+        brands: Sequence[str] = DEFAULT_BRANDS,
     ) -> list[dict]:
         if len(points) < 2:
             return []
@@ -89,25 +93,26 @@ class SpotDatabase:
         for first, second in zip(sampled, sampled[1:]):
             pad_lat = lat_degrees_for_meters(corridor_m)
             pad_lon = lon_degrees_for_meters(corridor_m, (first[0] + second[0]) / 2)
-            for burger in self._burgers_in_box(
+            for store in self._stores_in_box(
                 min(first[0], second[0]) - pad_lat,
                 min(first[1], second[1]) - pad_lon,
                 max(first[0], second[0]) + pad_lat,
                 max(first[1], second[1]) + pad_lon,
+                brands,
             ):
-                candidates[burger["id"]] = burger
+                candidates[store["id"]] = store
 
         spots = []
-        for burger in candidates.values():
+        for store in candidates.values():
             offset, progress, travel = route_match(
-                sampled, cumulative, sampled_seconds, burger["lat"], burger["lon"]
+                sampled, cumulative, sampled_seconds, store["lat"], store["lon"]
             )
             if offset > corridor_m:
                 continue
-            chargers = self._chargers_for(burger["id"], gap_m, only_enbw)
+            chargers = self._chargers_for(store["id"], gap_m, only_enbw)
             if not chargers:
                 continue
-            spot = self._spot(burger, chargers)
+            spot = self._spot(store, chargers)
             spot["routeOffsetM"] = round(offset)
             spot["routeProgressM"] = round(progress)
             spot["routeSeconds"] = round(travel)
@@ -118,19 +123,28 @@ class SpotDatabase:
 
     # ---- Innereien ------------------------------------------------------
 
-    def _burgers_in_box(self, south: float, west: float, north: float, east: float):
+    def _stores_in_box(
+        self,
+        south: float,
+        west: float,
+        north: float,
+        east: float,
+        brands: Sequence[str],
+    ):
+        placeholders = ",".join("?" for _ in brands)
         return self._connection.execute(
-            "SELECT b.* FROM burger b JOIN burger_rtree r ON r.rowid = b.rowid"
-            " WHERE r.max_lat >= ? AND r.min_lat <= ? AND r.max_lon >= ? AND r.min_lon <= ?",
-            (south, north, west, east),
+            "SELECT s.* FROM store s JOIN store_rtree r ON r.rowid = s.rowid"
+            " WHERE r.max_lat >= ? AND r.min_lat <= ? AND r.max_lon >= ? AND r.min_lon <= ?"
+            f" AND s.brand IN ({placeholders})",
+            (south, north, west, east, *brands),
         ).fetchall()
 
-    def _chargers_for(self, burger_id: str, gap_m: float, only_enbw: bool) -> list[dict]:
+    def _chargers_for(self, store_id: str, gap_m: float, only_enbw: bool) -> list[dict]:
         query = (
             "SELECT c.*, p.gap_m FROM pair p JOIN charger c ON c.id = p.charger_id"
-            " WHERE p.burger_id = ? AND p.gap_m <= ?"
+            " WHERE p.store_id = ? AND p.gap_m <= ?"
         )
-        parameters: list = [burger_id, gap_m]
+        parameters: list = [store_id, gap_m]
         if only_enbw:
             query += " AND c.is_enbw = 1"
         query += " ORDER BY p.gap_m"
@@ -150,15 +164,18 @@ class SpotDatabase:
         ]
 
     @staticmethod
-    def _spot(burger: sqlite3.Row, chargers: list[dict]) -> dict:
+    def _spot(store: sqlite3.Row, chargers: list[dict]) -> dict:
+        brand = BRANDS.get(store["brand"])
         return {
-            "id": burger["id"],
-            "name": burger["name"] or "Burger King",
-            "address": burger["address"],
-            "lat": burger["lat"],
-            "lon": burger["lon"],
-            "openingHours": burger["opening_hours"],
-            "osmUrl": f"https://www.openstreetmap.org/{burger['id']}",
+            "id": store["id"],
+            "brand": store["brand"],
+            "brandLabel": brand.label if brand else store["brand"],
+            "name": store["name"] or (brand.label if brand else "Filiale"),
+            "address": store["address"],
+            "lat": store["lat"],
+            "lon": store["lon"],
+            "openingHours": store["opening_hours"],
+            "osmUrl": f"https://www.openstreetmap.org/{store['id']}",
             "chargers": chargers,
         }
 
