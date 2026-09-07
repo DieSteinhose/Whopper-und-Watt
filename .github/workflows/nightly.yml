@@ -11,6 +11,7 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
   push:
+    branches: [pwa]
     paths:
       - "server/**"
       - "web/**"
@@ -54,8 +55,11 @@ jobs:
 
       # In eine eigene Datei einsammeln: schlaegt der Lauf fehl, bleibt der
       # mitgelieferte Stand unangetastet und die Seite geht trotzdem online.
+      # Bei einem Commit wird nicht eingesammelt: ein Ingest dauert Minuten und
+      # belastet fremde Server. Frische Daten holt der naechtliche Lauf.
       - name: Frisch einsammeln
         id: ingest
+        if: github.event_name != 'push'
         continue-on-error: true
         run: python3 server/ingest.py --db fresh.sqlite
 
@@ -63,8 +67,12 @@ jobs:
         if: steps.ingest.outcome == 'success'
         run: mv fresh.sqlite server/data/whopper.sqlite
 
+      - name: Stand aus dem Repository verwenden
+        if: github.event_name == 'push'
+        run: echo "::notice::Commit-Lauf, es bleibt beim Datenstand aus dem Repository."
+
       - name: Auf den mitgelieferten Stand zurueckfallen
-        if: steps.ingest.outcome != 'success'
+        if: github.event_name != 'push' && steps.ingest.outcome == 'failure'
         run: echo "::warning::Overpass war nicht erreichbar, es bleibt beim Stand aus dem Repository."
 
       - name: Statischen Datenbestand schreiben
