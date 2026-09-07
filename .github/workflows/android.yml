@@ -1,9 +1,20 @@
 name: Android
 
+# Die Android-App lebt auf dem Branch app. Der Branch pwa traegt diese Datei nur
+# mit, weil er aus derselben Geschichte stammt; dort soll sie nichts tun.
+# GitHub liest die Workflow-Datei aus dem Branch, auf den gepusht wird, also
+# steht die Einschraenkung hier und nicht anderswo.
 on:
   push:
-    branches: ["**"]
+    branches: [app]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - ".github/workflows/android.yml"
   pull_request:
+    branches: [app]
   workflow_dispatch:
 
 jobs:
