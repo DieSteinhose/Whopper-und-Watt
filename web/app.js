@@ -524,6 +524,7 @@ render();
 api('/api/meta')
   .then((meta) => {
     view.status.title =
-      `${meta.burgers} Filialen, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare · Stand ${meta.ingested_at}`;
+      `${meta.burgers} Filialen, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare` +
+      `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at}`;
   })
   .catch(() => setBanner('Server nicht erreichbar. Angezeigt wird, was im Cache liegt.'));

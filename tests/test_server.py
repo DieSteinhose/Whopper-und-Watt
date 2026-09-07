@@ -226,6 +226,41 @@ class IngestTest(unittest.TestCase):
             self.assertEqual(row["charger_id"], "node/near")
             self.assertAlmostEqual(row["gap_m"], 100, delta=5)
 
+    def test_area_query_falls_back_to_bounding_box(self):
+        """Instanzen ohne Area-Datenbank duerfen den Lauf nicht abbrechen."""
+        queries = []
+
+        def fake_overpass(query, timeout=300, attempts=4):
+            queries.append(query)
+            if "area.searched" in query:
+                raise RuntimeError("diese Instanz kennt keine Flaechen (area)")
+            return {
+                "elements": [
+                    {
+                        "type": "node",
+                        "id": 7,
+                        "lat": 48.0,
+                        "lon": 9.0,
+                        "tags": {"brand:wikidata": "Q177054"},
+                    }
+                ]
+            }
+
+        original = ingest.overpass
+        ingest.overpass = fake_overpass
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                connection = ingest.connect(Path(directory) / "fallback.sqlite")
+                count = ingest.load_burgers(connection, "47.2,5.8,55.1,15.1", "DE", None)
+        finally:
+            ingest.overpass = original
+
+        self.assertEqual(count, 1)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("area.searched", queries[0])
+        self.assertIn("47.2,5.8,55.1,15.1", queries[1])
+        self.assertNotIn("area.searched", queries[1])
+
     def test_burger_rows_survive_a_second_ingest(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "twice.sqlite"
@@ -244,7 +279,7 @@ class IngestTest(unittest.TestCase):
             seed.write_text(json.dumps(payload))
             for _ in range(2):
                 connection = ingest.connect(path)
-                ingest.load_burgers(connection, "DE", seed)
+                ingest.load_burgers(connection, ingest.GERMANY_BBOX, None, seed)
                 connection.close()
             connection = sqlite3.connect(path)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM burger").fetchone()[0], 1)

@@ -6,12 +6,13 @@ zwischen 10 Sekunden und mehreren Minuten und wurden regelmaessig mit HTTP 429
 oder 504 abgewiesen. Einmal einsammeln, danach lokal beantworten.
 
 Zwei Schritte, weil Burger King selten und Ladesaeulen haeufig sind:
-  1. Alle Filialen in Deutschland (eine Abfrage, rund 800 Objekte).
+  1. Alle Filialen im Suchbereich (eine Abfrage ueber eine Bounding-Box).
   2. Ladesaeulen in kleinen Boxen um genau diese Filialen, in Bloecken zu 20.
 
-Schritt 2 laeuft ueber eine halbe Stunde und wird von den oeffentlichen
-Overpass-Instanzen zwischendurch abgewiesen, deshalb ist der Lauf fortsetzbar:
-jeder erledigte Block wird sofort festgeschrieben, ein Neustart macht dort weiter.
+Schritt 2 sind rund fuenfzig Abfragen. Auf einer gut gelaunten Instanz dauert das
+wenige Minuten, auf einer ausgelasteten deutlich laenger, und zwischendurch weisen
+die oeffentlichen Instanzen Abfragen ab. Deshalb ist der Lauf fortsetzbar: jeder
+erledigte Block wird sofort festgeschrieben, ein Neustart macht dort weiter.
 
     python3 server/ingest.py --db server/data/whopper.sqlite
 """
@@ -55,6 +56,10 @@ USER_AGENT = "WhopperUndWatt/2.0 (PWA-Ingest; OpenStreetMap-Daten via Overpass)"
 
 BURGERS_PER_BLOCK = 20
 CHARGER_SEARCH_M = 1000
+
+# Deutschland mit etwas Rand. Bewusst grosszuegig: eine Filiale kurz hinter der
+# Grenze ist fuer die Frage genauso brauchbar wie eine kurz davor.
+GERMANY_BBOX = "47.20,5.80,55.10,15.10"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -119,6 +124,10 @@ def overpass(query: str, timeout: int = 300, attempts: int = 4) -> dict:
                 payload = json.loads(urllib.request.urlopen(request, timeout=timeout).read())
                 remark = payload.get("remark")
                 if remark:
+                    # Diese Meldung kommt, wenn die Instanz keine Area-Datenbank hat.
+                    # Ohne Uebersetzung ist sie kaum zu deuten.
+                    if "open64" in remark:
+                        raise RuntimeError("diese Instanz kennt keine Flaechen (area)")
                     raise RuntimeError(f"Overpass: {remark[:80]}")
                 print(
                     f"    {endpoint.split('//')[1][:22]} {time.time() - started:.1f}s "
@@ -148,25 +157,52 @@ def element_point(element: dict) -> tuple[float, float] | None:
     return None
 
 
-def burger_query(area: str) -> str:
+def burger_query(prelude: str, selector: str) -> str:
     return f"""[out:json][timeout:300];
-{area}
+{prelude}
 (
-  nwr["brand:wikidata"="{BURGER_KING_WIKIDATA}"](area.searched);
-  nwr["brand"="Burger King"](area.searched);
-  nwr["name"="Burger King"](area.searched);
+  nwr["brand:wikidata"="{BURGER_KING_WIKIDATA}"]{selector};
+  nwr["brand"="Burger King"]{selector};
+  nwr["name"="Burger King"]{selector};
 );
 out center tags;"""
 
 
-def load_burgers(connection: sqlite3.Connection, country: str, seed: Path | None) -> int:
+def load_burgers(
+    connection: sqlite3.Connection,
+    bbox: str,
+    country: str | None,
+    seed: Path | None,
+) -> int:
+    """Holt die Filialen, standardmaessig ueber eine Bounding-Box.
+
+    Die naheliegendere Variante ueber die Landesflaeche (area["ISO3166-1"="DE"])
+    setzt voraus, dass die Overpass-Instanz eine Area-Datenbank hat. Genau die
+    fehlt der schnellsten Instanz: overpass.openstreetmap.fr antwortet darauf mit
+    "runtime error: open64: 2 No such file or directory". Eine Bounding-Box
+    versteht dagegen jede Instanz. Der Preis ist ein Ueberhang ins Ausland, und
+    ein Burger King fuenfzehn Kilometer hinter der Grenze schadet niemandem.
+    """
     if seed and seed.exists():
         print(f"Filialen aus {seed}", flush=True)
         payload = json.loads(seed.read_text())
+    elif country:
+        print(f"Filialen in {country} abfragen (braucht eine Instanz mit Area-Daten)", flush=True)
+        try:
+            # Nur ein Durchgang durch die Endpunkte: fehlende Area-Daten sind kein
+            # Ausfall, den Warten heilt, sondern ein Grund fuer die Bounding-Box.
+            payload = overpass(
+                burger_query(
+                    f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;', "(area.searched)"
+                ),
+                attempts=1,
+            )
+        except RuntimeError as error:
+            print(f"  Flaechensuche gescheitert ({error}), weiche auf die Bounding-Box aus", flush=True)
+            payload = overpass(burger_query("", f"({bbox})"))
     else:
-        print(f"Filialen in {country} abfragen (dauert einige Minuten)", flush=True)
-        area = f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;'
-        payload = overpass(burger_query(area))
+        print(f"Filialen im Bereich {bbox} abfragen (dauert einige Minuten)", flush=True)
+        payload = overpass(burger_query("", f"({bbox})"))
 
     rows = []
     for element in payload.get("elements", []):
@@ -311,7 +347,17 @@ def set_meta(connection: sqlite3.Connection, **values: object) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="server/data/whopper.sqlite")
-    parser.add_argument("--country", default="DE", help="ISO-3166-1-Code des Suchgebiets")
+    parser.add_argument(
+        "--bbox",
+        default=GERMANY_BBOX,
+        help="Suchbereich als south,west,north,east (Standard: Deutschland mit Rand)",
+    )
+    parser.add_argument(
+        "--country",
+        default=None,
+        help="ISO-3166-1-Code statt Bounding-Box. Braucht eine Instanz mit Area-Daten,"
+        " sonst wird automatisch auf die Bounding-Box zurueckgefallen.",
+    )
     parser.add_argument("--burgers-json", type=Path, default=None, help="Overpass-Antwort wiederverwenden")
     parser.add_argument("--gap", type=float, default=1000.0, help="Maximaler Abstand fuer Paare in Metern")
     parser.add_argument("--no-resume", action="store_true", help="Ladesaeulen komplett neu holen")
@@ -322,7 +368,7 @@ def main() -> int:
     started = time.time()
 
     if not arguments.pairs_only:
-        load_burgers(connection, arguments.country, arguments.burgers_json)
+        load_burgers(connection, arguments.bbox, arguments.country, arguments.burgers_json)
         load_chargers(connection, resume=not arguments.no_resume)
 
     print("Paare berechnen", flush=True)
@@ -336,7 +382,7 @@ def main() -> int:
     set_meta(
         connection,
         ingested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        country=arguments.country,
+        area=arguments.country or f"bbox {arguments.bbox}",
         burgers=counts["burger"],
         chargers=counts["charger"],
         pairs=pairs,

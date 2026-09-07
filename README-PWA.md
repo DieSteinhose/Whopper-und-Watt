@@ -23,8 +23,16 @@ Browser (PWA)          Server (Python, nur Standardbibliothek)      einmalig
 
 `server/ingest.py` baut sie in zwei Schritten, weil Burger King selten und Ladesäulen häufig sind:
 
-1. Alle Filialen in Deutschland, eine Abfrage über die ISO-Landesfläche.
+1. Alle Filialen im Suchbereich, eine Abfrage über eine Bounding-Box.
 2. Ladesäulen in 1-km-Boxen um genau diese Filialen, in Blöcken zu 20.
+
+**Warum Bounding-Box und nicht Landesfläche:** die naheliegendere Abfrage
+`area["ISO3166-1"="DE"]` setzt voraus, dass die Overpass-Instanz eine Area-Datenbank hat.
+Ausgerechnet der schnellsten Instanz fehlt sie: `overpass.openstreetmap.fr` antwortet darauf
+mit `runtime error: open64: 2 No such file or directory`. Eine Bounding-Box versteht jede
+Instanz. Der Preis ist ein Überhang ins Ausland, und ein Burger King fünfzehn Kilometer hinter
+der Grenze schadet niemandem. Wer es exakt will, nimmt `--country DE`; scheitert die
+Flächensuche, fällt der Ingest automatisch auf die Bounding-Box zurück.
 
 Danach werden die Paare (Filiale ↔ Säule bis 1000 m) einmal ausgerechnet und gespeichert, und
 die Filialen kommen in einen R-Tree-Index. Eine Suche ist damit ein Index-Zugriff plus etwas
@@ -33,6 +41,7 @@ Arithmetik.
 ```bash
 python3 server/ingest.py --db server/data/whopper.sqlite     # dauert wenige Minuten
 python3 server/ingest.py --pairs-only                        # nur Paare neu rechnen
+python3 server/ingest.py --bbox 46.4,9.5,49.0,17.2           # anderer Suchbereich
 ```
 
 Der Lauf ist fortsetzbar: jeder erledigte Block wird sofort festgeschrieben, ein Abbruch kostet
