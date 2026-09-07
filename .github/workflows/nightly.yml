@@ -39,9 +39,9 @@ jobs:
           node-version: "22"
       - name: Python-Tests
         run: python3 -m unittest discover -s tests -v
-      # Ohne web/data/spots.json ueberspringt local-search.test.mjs die Tests,
-      # die den Datenbestand brauchen. Der Rest laeuft trotzdem, und gegen echte
-      # Daten laufen sie im Job "Datenbestand" noch einmal vollstaendig.
+      # Ohne die Exportdateien unter web/data ueberspringt local-search.test.mjs
+      # die Tests, die den Datenbestand brauchen. Der Rest laeuft trotzdem, und
+      # gegen echte Daten laufen sie im Job "Datenbestand" noch einmal komplett.
       - name: Node-Tests
         run: node --test tests/opening-hours.test.mjs tests/local-search.test.mjs
 
@@ -55,12 +55,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      # server/data/ enthaelt nur die erzeugte Datenbank und ist deshalb nicht im
+      # Repository. Git kennt keine leeren Verzeichnisse, im Checkout gibt es das
+      # Verzeichnis also nicht, und ohne diesen Schritt scheitert das spaetere mv
+      # mit "No such file or directory".
+      - name: Verzeichnis fuer die Datenbank anlegen
+        run: mkdir -p server/data
+
       # Die Datenbank ist rund 50 MB gross und aendert sich bei jedem Ingest
       # komplett. Im Repository waere sie am falschen Platz, also liegt sie im
       # Actions-Cache. Der naechtliche Lauf haelt ihn warm.
+      #
+      # restore und save getrennt, nicht actions/cache am Stueck: nur restore
+      # liefert cache-matched-key, und genau daran haengt unten die Entscheidung,
+      # ob eingesammelt werden muss. Gespeichert wird ausserdem nur nach einem
+      # frischen Ingest, statt bei jedem Lauf denselben Stand neu abzulegen.
       - name: Datenbank aus dem Cache holen
         id: cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: server/data/whopper.sqlite
           key: whopper-db-${{ github.run_id }}
@@ -79,6 +91,13 @@ jobs:
       - name: Frischen Stand uebernehmen
         if: steps.ingest.outcome == 'success'
         run: mv fresh.sqlite server/data/whopper.sqlite
+
+      - name: Frischen Stand in den Cache legen
+        if: steps.ingest.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: server/data/whopper.sqlite
+          key: whopper-db-${{ github.run_id }}
 
       - name: Stand aus dem Cache verwenden
         if: steps.ingest.outcome != 'success'
@@ -101,29 +120,42 @@ jobs:
       - name: Suche gegen echte Daten pruefen
         run: node --test tests/local-search.test.mjs
 
+      # Der Export besteht aus zwei Dateien, und geprueft werden muss beides:
+      # spots.json enthaelt seit der Aufteilung nur noch die Ketten. Wer hier
+      # nur die eine Datei liest, sieht nie ein veganes Lokal.
       - name: Bestand pruefen
         run: |
           python3 - <<'PY'
           import json, sys
-          data = json.load(open("web/data/spots.json"))
-          spots = data["spots"]
-          chargers = sum(len(spot["chargers"]) for spot in spots)
-          per_kind = {
-              "Ketten": sum(1 for spot in spots if spot["brand"]),
-              "vegan": sum(1 for spot in spots if spot["vegan"]),
-              "rein vegan": sum(1 for spot in spots if spot["veganOnly"]),
-          }
-          print(f"{len(spots)} Lokale mit {chargers} Ladesaeulen, Stand {data['meta'].get('ingested_at')}")
-          print(", ".join(f"{count} {label}" for label, count in per_kind.items()))
+
+          base = json.load(open("web/data/spots.json"))
+          vegan = json.load(open("web/data/spots-vegan.json"))
+          chargers = sum(len(spot["chargers"]) for part in (base, vegan) for spot in part["spots"])
+          chains = sum(1 for spot in base["spots"] if spot["brand"])
+          only = sum(1 for part in (base, vegan) for spot in part["spots"] if spot["veganOnly"])
+
+          print(f"Stand {base['meta'].get('ingested_at')}, {chargers} Ladesaeulen")
+          print(f"  spots.json       {len(base['spots']):6d} Lokale, davon {chains} aus einer Kette")
+          print(f"  spots-vegan.json {len(vegan['spots']):6d} Lokale")
+          print(f"  rein vegan       {only:6d}")
+
           # Ein leerer oder halber Bestand darf nicht online gehen. Die Schwellen
-          # sind bewusst deutlich unter den gemessenen Zahlen: sie sollen einen
-          # kaputten Lauf abfangen, nicht bei normalen Schwankungen anschlagen.
-          if len(spots) < 1000 or chargers < 1000:
-              sys.exit("Datenbestand unplausibel klein, Abbruch")
-          if per_kind["Ketten"] < 300:
-              sys.exit("Zu wenige Kettenfilialen, die Ketten-Abfrage ist vermutlich kaputt")
-          if per_kind["vegan"] <= per_kind["Ketten"]:
-              sys.exit("Keine veganen Lokale ausser den Ketten, die diet:vegan-Abfrage ist kaputt")
+          # sind bewusst deutlich unter den gemessenen Zahlen (1651 / 12655 / 509):
+          # sie sollen einen kaputten Lauf abfangen, nicht bei normalen
+          # Schwankungen anschlagen.
+          if chargers < 1000:
+              sys.exit("Zu wenige Ladesaeulen, Abbruch")
+          if chains < 300 or chains != len(base["spots"]):
+              sys.exit("spots.json ist nicht der Kettenteil, die Aufteilung ist kaputt")
+          if len(vegan["spots"]) < 1000:
+              sys.exit("Zu wenige vegane Lokale, die diet:vegan-Abfrage ist vermutlich kaputt")
+          if only < 50:
+              sys.exit("Fast nichts rein vegan, diet:vegan=only wird nicht erkannt")
+          # Jede Zeile im Zusatzteil muss auch wirklich vegan sein, sonst zeigt
+          # die App unter "Vegane Optionen" irgendetwas an.
+          off = [spot["id"] for spot in vegan["spots"] if not spot["vegan"] or spot["brand"]][:5]
+          if off:
+              sys.exit(f"Nicht-vegane oder Ketten-Eintraege im Zusatzteil: {off}")
           PY
 
       # Nur der statische Export wandert weiter. Die Datenbank bleibt im Cache,

@@ -225,7 +225,7 @@ die Portierung des Auswerters aus der Android-App, mit denselben Grenzen und den
 
 |  | mit Server | ohne Server |
 |---|---|---|
-| Suche | SQLite auf dem Server | im Browser, aus `data/spots.json` |
+| Suche | SQLite auf dem Server | im Browser, aus `data/spots*.json` |
 | Geocoding und Routing | über den Server, mit Cache | direkt an Nominatim und OSRM |
 | Offline | Hülle aus dem Cache | Hülle **und Suche** aus dem Cache |
 | Hosting | eigener Rechner | jede Dateiablage, etwa GitHub Pages |
@@ -291,7 +291,8 @@ Deploy-Schritt fehl.
    gar keine veganen Lokale außer den Ketten brechen den Lauf ab. Die letzte Bedingung fängt
    genau den Fall ab, dass die `diet:vegan`-Abfrage still ins Leere läuft und der Bestand
    trotzdem groß genug aussieht.
-3. **Pages**: das Verzeichnis `web/` samt frischer `data/spots.json` wird veröffentlicht.
+3. **Pages**: das Verzeichnis `web/` samt frischer `data/spots.json` und `data/spots-vegan.json`
+   wird veröffentlicht.
 
 Bei einem gewöhnlichen Commit auf `pwa` wird nicht neu eingesammelt: das dauert Minuten und
 belastet fremde Server, und für eine Codeänderung verschieben sich keine Ladesäulen. Der Lauf
@@ -312,12 +313,13 @@ nicht weil in Bochum eine Ladesäule dazugekommen ist.
 ```bash
 python3 -m unittest discover -s tests          # Geometrie, Datenbank, Datei-Import
 node --test tests/opening-hours.test.mjs       # Öffnungszeiten im Browser-Code
-node --test tests/local-search.test.mjs        # Suche im Browser, gegen data/spots.json
+node --test tests/local-search.test.mjs        # Suche im Browser, gegen beide Exportdateien
 ```
 
-`tests/local-search.test.mjs` überspringt die datenabhängigen Fälle, solange
-`web/data/spots.json` fehlt (die Datei ist nicht eingecheckt). Erst `server/export_static.py`
-laufen lassen, dann laufen sie vollständig.
+`tests/local-search.test.mjs` überspringt die datenabhängigen Fälle, solange die Exportdateien
+fehlen (sie sind nicht eingecheckt). Erst `server/ingest.py` und `server/export_static.py`
+laufen lassen, dann laufen sie vollständig, und dann prüfen sie auch, dass eine Suche nach
+Burger King den großen Zusatzteil gar nicht erst anfasst.
 
 Beide Testsätze arbeiten mit echten Daten: realen Koordinaten, dem echten Aufbau eines
 ABRP-Excel-Exports und allen 54 unterschiedlichen `opening_hours`-Angaben aus der Stichprobe.
