@@ -175,7 +175,6 @@ class SpotDatabase:
             "lat": store["lat"],
             "lon": store["lon"],
             "openingHours": store["opening_hours"],
-            "osmUrl": f"https://www.openstreetmap.org/{store['id']}",
             "chargers": chargers,
         }
 

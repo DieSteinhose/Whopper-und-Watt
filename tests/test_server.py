@@ -180,6 +180,31 @@ class DatabaseTest(unittest.TestCase):
         # Ohne Kette gibt es nichts, und das darf kein Fehler sein.
         self.assertEqual(ids([]), [])
 
+    def test_static_export_has_the_same_fields_as_the_server(self):
+        """Der Betrieb ohne Server muss dieselben Felder liefern wie der mit.
+
+        Genau daran ist der OSM-Knopf gescheitert: der Server lieferte ein Feld
+        osmUrl, der statische Export nicht, und im Browser stand dann
+        href="undefined".
+        """
+        import export_static
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = export_static.export(self.database.path, Path(directory) / "spots.json")
+        exported = {spot["id"]: spot for spot in payload["spots"]}
+
+        served = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=1000, only_enbw=False,
+            brands=["bk", "subway"],
+        )
+        self.assertTrue(served)
+        for spot in served:
+            counterpart = exported[spot["id"]]
+            # Was erst die Abfrage ausrechnet, steht naturgemaess nicht im Export.
+            per_query = {"distanceM", "routeOffsetM", "routeProgressM", "routeSeconds"}
+            self.assertEqual(set(spot) - per_query, set(counterpart), spot["id"])
+            self.assertEqual(set(spot["chargers"][0]), set(counterpart["chargers"][0]))
+
     def test_brand_label_travels_with_the_spot(self):
         spot = self.database.spots_near(
             *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, brands=["subway"]

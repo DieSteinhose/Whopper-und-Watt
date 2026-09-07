@@ -171,7 +171,7 @@ GitHub-Konto oder eine Organisation **genau so heißt** und dort ein Repository 
 `whopperundwatt.github.io` liegt. Unter dem bestehenden Konto lautet die Adresse
 
 ```
-https://diesteinhose.github.io/enbw-plus-whopper/
+https://<konto>.github.io/<repository>/
 ```
 
 Deshalb sind alle Pfade in der App relativ: unter einem Unterverzeichnis würde jeder absolute

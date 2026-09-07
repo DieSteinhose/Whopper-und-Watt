@@ -338,7 +338,7 @@ function card(spot, now) {
       <div class="actions">
         <a href="geo:${spot.lat},${spot.lon}?q=${spot.lat},${spot.lon}(${encodeURIComponent(spot.name)})">Zur Filiale</a>
         ${charger ? `<a href="geo:${charger.lat},${charger.lon}?q=${charger.lat},${charger.lon}(Ladesäule)">Zur Säule</a>` : ''}
-        <a href="${spot.osmUrl}" target="_blank" rel="noreferrer">OSM</a>
+        <a href="${osmLink(spot)}" target="_blank" rel="noreferrer">OSM</a>
       </div>
     </article>`;
 }
@@ -356,6 +356,13 @@ function describeOpen(open, arrival) {
     return (open.until ? `offen bis ${formatMoment(open.until, arrival)}` : 'durchgehend offen') + suffix;
   }
   return (open.nextOpen ? `geschlossen, öffnet ${formatMoment(open.nextOpen, arrival)}` : 'geschlossen') + suffix;
+}
+
+// Die ID ist "node/123" oder "way/456", daraus baut sich die Adresse von selbst.
+// Frueher lieferte der Server dafuer ein eigenes Feld, der statische Export aber
+// nicht: ohne Server zeigte der Knopf auf "undefined".
+function osmLink(spot) {
+  return `https://www.openstreetmap.org/${spot.id}`;
 }
 
 function trimNumber(value) {
