@@ -58,6 +58,19 @@ def is_address(value: str) -> bool:
     return "," in text or any(character.isdigit() for character in text)
 
 
+# Eine kleine Zip-Datei kann sich beim Auspacken auf Gigabyte aufblasen. Der
+# Server nimmt Uploads aus dem Netz entgegen, also wird beim Lesen gedeckelt.
+MAX_ENTRY_BYTES = 8 * 1024 * 1024
+
+
+def _read_capped(archive: zipfile.ZipFile, name: str) -> str:
+    with archive.open(name) as entry:
+        data = entry.read(MAX_ENTRY_BYTES + 1)
+    if len(data) > MAX_ENTRY_BYTES:
+        raise ValueError("Das Tabellenblatt ist unplausibel gross.")
+    return data.decode("utf-8", errors="replace")
+
+
 def parse_xlsx(data: bytes) -> tuple[list[str], int]:
     """Adressen aus Spalte A und die Zahl der Wegpunkte ohne Ortsangabe."""
     sheet = None
@@ -65,9 +78,9 @@ def parse_xlsx(data: bytes) -> tuple[list[str], int]:
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
         for name in archive.namelist():
             if name.endswith("xl/worksheets/sheet1.xml"):
-                sheet = archive.read(name).decode("utf-8")
+                sheet = _read_capped(archive, name)
             elif name.endswith("xl/sharedStrings.xml"):
-                shared_xml = archive.read(name).decode("utf-8")
+                shared_xml = _read_capped(archive, name)
     if sheet is None:
         raise ValueError("Die Datei enthaelt kein Tabellenblatt.")
 

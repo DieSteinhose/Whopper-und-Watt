@@ -163,6 +163,11 @@ async function withLoading(task) {
 
 function currentPosition() {
   return new Promise((resolve, reject) => {
+    // Ohne HTTPS gibt der Browser gar keinen Standort heraus, egal was der Nutzer erlaubt.
+    if (!window.isSecureContext) {
+      reject(new Error('Standort gibt es nur über HTTPS. Ort bitte eintippen.'));
+      return;
+    }
     if (!navigator.geolocation) {
       reject(new Error('Dieses Gerät liefert keinen Standort. Ort bitte eintippen.'));
       return;

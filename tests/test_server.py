@@ -10,6 +10,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
 
+import app  # noqa: E402
 import geo  # noqa: E402
 import ingest  # noqa: E402
 import plan  # noqa: E402
@@ -202,6 +204,47 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(len(thinned), 20)
         self.assertEqual(thinned[0], points[0])
         self.assertEqual(thinned[-1], points[-1])
+
+
+class NetworkExposureTest(unittest.TestCase):
+    """Was zaehlt, sobald der Server nicht mehr nur auf localhost lauscht."""
+
+    def test_rate_limiter_blocks_after_limit_and_separates_clients(self):
+        limiter = app.RateLimiter(limit=3, window_s=60)
+        self.assertTrue(all(limiter.allow("1.2.3.4") for _ in range(3)))
+        self.assertFalse(limiter.allow("1.2.3.4"))
+        # Eine andere Adresse hat ihr eigenes Kontingent.
+        self.assertTrue(limiter.allow("5.6.7.8"))
+
+    def test_rate_limiter_window_expires(self):
+        limiter = app.RateLimiter(limit=1, window_s=0.05)
+        self.assertTrue(limiter.allow("1.2.3.4"))
+        self.assertFalse(limiter.allow("1.2.3.4"))
+        time.sleep(0.06)
+        self.assertTrue(limiter.allow("1.2.3.4"))
+
+    def test_only_expensive_endpoints_are_throttled(self):
+        self.assertTrue("/api/geocode".startswith(app.EXPENSIVE))
+        self.assertTrue("/api/route-spots".startswith(app.EXPENSIVE))
+        self.assertTrue("/api/plan".startswith(app.EXPENSIVE))
+        # Die eigentliche Suche kommt aus der lokalen Datenbank und bleibt frei.
+        self.assertFalse("/api/spots".startswith(app.EXPENSIVE))
+        self.assertFalse("/index.html".startswith(app.EXPENSIVE))
+
+    def test_bound_to_all_interfaces_shows_real_addresses(self):
+        self.assertEqual(app._reachable_urls("127.0.0.1", 8000), ["http://127.0.0.1:8000"])
+        urls = app._reachable_urls("0.0.0.0", 8000)
+        self.assertIn("http://127.0.0.1:8000", urls)
+        self.assertTrue(all(url.endswith(":8000") for url in urls))
+
+    def test_oversized_sheet_is_refused(self):
+        """Eine kleine Zip-Datei darf sich beim Auspacken nicht aufblasen duerfen."""
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("xl/worksheets/sheet1.xml", "A" * (plan.MAX_ENTRY_BYTES + 10))
+        self.assertLess(len(buffer.getvalue()), 100_000)  # gepackt winzig
+        with self.assertRaises(ValueError):
+            plan.parse_xlsx(buffer.getvalue())
 
 
 class IngestTest(unittest.TestCase):

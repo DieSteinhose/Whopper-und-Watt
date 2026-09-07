@@ -5,9 +5,13 @@ Liefert die PWA aus und beantwortet die Suchen aus der lokalen Datenbank.
 Bewusst nur Standardbibliothek: kein Build, keine Abhaengigkeiten, laeuft ueberall,
 wo Python 3.11 liegt.
 
-    python3 server/app.py --port 8000
+    python3 server/app.py --port 8000                       # nur dieser Rechner
+    python3 server/app.py --host 0.0.0.0 --trust-proxy      # im Netz erreichbar
 
-Fuer den Betrieb hinter einem Reverse Proxy reicht --host 127.0.0.1 (Standard).
+Der Standard ist Absicht: an alle Schnittstellen zu binden gehoert eine bewusste
+Entscheidung, kein Vorgabewert. Laeuft der Reverse Proxy auf demselben Rechner,
+reicht 127.0.0.1. Steht er woanders, im Docker-Netz oder auf einem anderen Host,
+braucht es --host 0.0.0.0, sonst meldet er nur, dass niemand antwortet.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import socket
 import sys
 import threading
 import time
@@ -39,16 +44,86 @@ MAX_GAP_M = 2_000
 # Dateien, die sich nie aendern, duerfen lange im Browser bleiben.
 LONG_CACHE = ("/vendor/", "/icons/")
 
+# Endpunkte, die nach draussen telefonieren oder Dateien auspacken, bekommen
+# eine Bremse pro IP. Die Suche selbst ist billig und bleibt frei.
+EXPENSIVE = ("/api/geocode", "/api/route-spots", "/api/plan")
+EXPENSIVE_PER_MINUTE = 20
+
+# Die Seite laedt alles aus dem eigenen Verzeichnis, nur die Kartenkacheln nicht.
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "img-src 'self' data: https://tile.openstreetmap.org; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'none'"
+)
+
+
+class RateLimiter:
+    """Gleitendes Fenster je Schluessel, ohne Fremdbibliothek."""
+
+    def __init__(self, limit: int, window_s: float = 60.0):
+        self._limit = limit
+        self._window = window_s
+        self._lock = threading.Lock()
+        self._hits: dict[str, list[float]] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.time()
+        with self._lock:
+            hits = [stamp for stamp in self._hits.get(key, ()) if now - stamp < self._window]
+            if len(hits) >= self._limit:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            # Gelegentlich aufraeumen, damit der Speicher nicht mitwaechst.
+            if len(self._hits) > 4096:
+                self._hits = {
+                    other: stamps
+                    for other, stamps in self._hits.items()
+                    if stamps and now - stamps[-1] < self._window
+                }
+            return True
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "WhopperWatt/2.0"
+    # HTTP/1.1 haelt die Verbindung offen. Jede Antwort setzt Content-Length,
+    # sonst wuerde der Browser auf ein Ende warten, das nie kommt.
+    protocol_version = "HTTP/1.1"
     database: SpotDatabase
+    limiter = RateLimiter(EXPENSIVE_PER_MINUTE)
+    trust_proxy = False
+
+    @property
+    def client_ip(self) -> str:
+        """Hinter einem Reverse Proxy steht die echte Adresse im Header."""
+        if self.trust_proxy:
+            forwarded = self.headers.get("X-Forwarded-For")
+            if forwarded:
+                return forwarded.split(",")[0].strip()
+        return self.client_address[0]
+
+    def _throttled(self, route: str) -> bool:
+        if not route.startswith(EXPENSIVE):
+            return False
+        if self.limiter.allow(self.client_ip):
+            return False
+        self._error(
+            HTTPStatus.TOO_MANY_REQUESTS,
+            f"Zu viele Anfragen. Erlaubt sind {EXPENSIVE_PER_MINUTE} pro Minute.",
+        )
+        return True
 
     def do_GET(self) -> None:  # noqa: N802 - von BaseHTTPRequestHandler vorgegeben
         parsed = urlparse(self.path)
         route = parsed.path
         query = parse_qs(parsed.query)
         started = time.time()
+        if self._throttled(route):
+            return
         try:
             if route == "/api/meta":
                 self._json(self._meta())
@@ -68,6 +143,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         started = time.time()
+        if self._throttled(parsed.path):
+            return
         try:
             if parsed.path == "/api/route-spots":
                 self._json(self._route_spots(self._body(), started))
@@ -196,6 +273,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type or "application/octet-stream")
         self.send_header("Content-Length", str(len(payload)))
+        self._security_headers()
+        if target.suffix in (".html", ".webmanifest"):
+            self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
         if any(part in route for part in LONG_CACHE):
             self.send_header("Cache-Control", "public, max-age=604800")
         else:
@@ -210,8 +290,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
+
+    def _security_headers(self) -> None:
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
 
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json({"ok": False, "error": message}, status)
@@ -232,6 +317,23 @@ def _number(query: dict, name: str, default: float | None = None, required: bool
         raise ValueError(f"Parameter {name} ist keine Zahl") from error
 
 
+def _reachable_urls(host: str, port: int) -> list[str]:
+    """Bei 0.0.0.0 die tatsaechlichen Adressen zeigen, nicht die Bindeadresse."""
+    if host not in ("0.0.0.0", "::"):
+        return [f"http://{host}:{port}"]
+
+    addresses = {"127.0.0.1"}
+    try:
+        # Verbindet nichts, ermittelt nur die Adresse der Standardroute.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("192.0.2.1", 9))  # reservierter Testbereich
+        addresses.add(probe.getsockname()[0])
+        probe.close()
+    except OSError:
+        pass
+    return [f"http://{address}:{port}" for address in sorted(addresses)]
+
+
 def _flag(query: dict, name: str, default: bool) -> bool:
     values = query.get(name)
     if not values:
@@ -242,19 +344,45 @@ def _flag(query: dict, name: str, default: bool) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=str(Path(__file__).resolve().parent / "data/whopper.sqlite"))
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="127.0.0.1 nur lokal, 0.0.0.0 auf allen Schnittstellen",
+    )
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--trust-proxy",
+        action="store_true",
+        help="X-Forwarded-For auswerten. Nur setzen, wenn wirklich ein Reverse Proxy"
+        " davorsteht, sonst kann sich jeder eine fremde IP ausdenken.",
+    )
     arguments = parser.parse_args()
 
     Handler.database = SpotDatabase(Path(arguments.db))
+    Handler.trust_proxy = arguments.trust_proxy
     meta = Handler.database.meta()
     server = ThreadingHTTPServer((arguments.host, arguments.port), Handler)
+
     print(
-        f"Whopper & Watt auf http://{arguments.host}:{arguments.port}  "
-        f"({meta.get('burgers', '?')} Filialen, {meta.get('chargers', '?')} Saeulen, "
-        f"Stand {meta.get('ingested_at', '?')})",
+        f"Whopper & Watt: {meta.get('burgers', '?')} Filialen, "
+        f"{meta.get('chargers', '?')} Saeulen, Stand {meta.get('ingested_at', '?')}",
         flush=True,
     )
+    for url in _reachable_urls(arguments.host, arguments.port):
+        print(f"  {url}", flush=True)
+    if arguments.host in ("127.0.0.1", "localhost", "::1"):
+        print(
+            "  Nur von diesem Rechner erreichbar. Fuer das Netz:"
+            " --host 0.0.0.0 (und --trust-proxy hinter einem Reverse Proxy)",
+            flush=True,
+        )
+    else:
+        print(
+            "  Hinweis: Installation als App, Service Worker und die Standortabfrage"
+            " verlangen HTTPS. Ueber eine nackte IP ohne TLS bleibt die Seite eine"
+            " normale Webseite.",
+            flush=True,
+        )
     threading.current_thread().name = "http"
     try:
         server.serve_forever()
