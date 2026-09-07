@@ -1,0 +1,148 @@
+name: Nightly
+
+# Jede Nacht: Daten neu einsammeln, Seite veroeffentlichen, Image bauen.
+#
+# Achtung, GitHub-Eigenheit: geplante Laeufe starten ausschliesslich auf dem
+# Standard-Branch des Repositories. Solange dieser Branch nicht der Standard ist
+# oder dorthin gemerged wurde, feuert der Zeitplan nicht. Von Hand geht es ueber
+# "Run workflow" jederzeit.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+  push:
+    paths:
+      - "server/**"
+      - "web/**"
+      - "tests/**"
+      - "Dockerfile"
+      - ".github/workflows/nightly.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Python-Tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Node-Tests
+        run: node --test tests/opening-hours.test.mjs
+
+  data:
+    name: Datenbestand
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # In eine eigene Datei einsammeln: schlaegt der Lauf fehl, bleibt der
+      # mitgelieferte Stand unangetastet und die Seite geht trotzdem online.
+      - name: Frisch einsammeln
+        id: ingest
+        continue-on-error: true
+        run: python3 server/ingest.py --db fresh.sqlite
+
+      - name: Frischen Stand uebernehmen
+        if: steps.ingest.outcome == 'success'
+        run: mv fresh.sqlite server/data/whopper.sqlite
+
+      - name: Auf den mitgelieferten Stand zurueckfallen
+        if: steps.ingest.outcome != 'success'
+        run: echo "::warning::Overpass war nicht erreichbar, es bleibt beim Stand aus dem Repository."
+
+      - name: Statischen Datenbestand schreiben
+        run: python3 server/export_static.py
+
+      - name: Bestand pruefen
+        run: |
+          python3 - <<'PY'
+          import json, sqlite3, sys
+          data = json.load(open("web/data/spots.json"))
+          spots = data["spots"]
+          chargers = sum(len(spot["chargers"]) for spot in spots)
+          print(f"{len(spots)} Filialen mit {chargers} Ladesaeulen, Stand {data['meta'].get('ingested_at')}")
+          # Ein leerer oder halber Bestand darf nicht online gehen.
+          if len(spots) < 300 or chargers < 1000:
+              sys.exit("Datenbestand unplausibel klein, Abbruch")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datenbestand
+          path: |
+            server/data/whopper.sqlite
+            web/data/spots.json
+          retention-days: 7
+
+  pages:
+    name: GitHub Pages
+    needs: data
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: datenbestand
+      - uses: actions/configure-pages@v5
+      # Auf Pages laeuft kein Server, deshalb geht nur das Verzeichnis web/
+      # online. Die Suche rechnet dort der Browser aus data/spots.json.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+  image:
+    name: Container-Image
+    needs: data
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: datenbestand
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bauen und veroeffentlichen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.run_number }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.description=Burger King neben der Ladesaeule
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

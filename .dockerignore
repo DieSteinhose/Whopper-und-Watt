@@ -1,0 +1,17 @@
+# Der Build-Kontext soll klein bleiben: alles, was nicht in den Server gehoert.
+.git
+.github
+app
+build
+gradle
+gradlew
+gradlew.bat
+*.gradle.kts
+gradle.properties
+local.properties
+tests
+web/data
+**/__pycache__
+*.pyc
+*.apk
+README.md

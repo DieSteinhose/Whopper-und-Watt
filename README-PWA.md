@@ -131,6 +131,77 @@ Die Öffnungszeiten werden **im Browser** ausgewertet, nicht auf dem Server: das
 Abfahrtszeit ist damit sofort sichtbar und kostet keinen Roundtrip. `web/opening-hours.js` ist
 die Portierung des Auswerters aus der Android-App, mit denselben Grenzen und denselben Tests.
 
+## Zwei Betriebsarten aus einem Quellstand
+
+|  | mit Server | ohne Server |
+|---|---|---|
+| Suche | SQLite auf dem Server | im Browser, aus `data/spots.json` |
+| Geocoding und Routing | über den Server, mit Cache | direkt an Nominatim und OSRM |
+| Offline | Hülle aus dem Cache | Hülle **und Suche** aus dem Cache |
+| Hosting | eigener Rechner, Container | jede Dateiablage, etwa GitHub Pages |
+
+Die App erkennt die Betriebsart selbst: der eigene Server schickt den Header `X-Whopper-Backend`
+mit, auf einer reinen Dateiablage fehlt er. Kein Testaufruf ins Leere, der in jeder
+Browserkonsole als Fehler stünde.
+
+## GitHub Pages
+
+Das geht, mit einer Einschränkung und einer Klarstellung.
+
+**Die Einschränkung:** Pages liefert nur Dateien aus, dort läuft kein Python. Deshalb der
+Betrieb ohne Server: der komplette Datenbestand liegt als eine JSON-Datei daneben, rund 1,3 MB,
+gepackt gut 200 KB, und die Suche rechnet der Browser. Das ist sogar die bessere PWA, denn nach
+dem ersten Laden funktioniert die Suche auch ohne Netz. Was ohne Server nicht offline geht, ist
+Geocoding und Routing, denn dafür braucht es Nominatim und OSRM.
+
+**Die Klarstellung zur Adresse:** `whopperundwatt.github.io` gibt es nur, wenn ein
+GitHub-Konto oder eine Organisation **genau so heißt** und dort ein Repository namens
+`whopperundwatt.github.io` liegt. Unter dem bestehenden Konto lautet die Adresse
+
+```
+https://diesteinhose.github.io/enbe-plus-whopper/
+```
+
+Deshalb sind alle Pfade in der App relativ: unter einem Unterverzeichnis würde jeder absolute
+Pfad ins Leere zeigen, samt Service Worker und Manifest.
+
+Einmalig nötig: **Settings → Pages → Source: GitHub Actions**. Ohne das schlägt der
+Deploy-Schritt fehl.
+
+## Jede Nacht neu
+
+`.github/workflows/nightly.yml` läuft um 03:17 UTC und lässt sich jederzeit von Hand starten:
+
+1. **Tests**, Python und Node.
+2. **Datenbestand**: frischer Ingest in eine eigene Datei. Klappt er, ersetzt er den Stand aus
+   dem Repository; klappt er nicht, bleibt der alte und der Lauf geht weiter, statt die Seite
+   abzuschalten. Danach eine Plausibilitätsprüfung: unter 300 Filialen oder 1000 Ladesäulen
+   bricht der Lauf ab, damit kein halber Bestand online geht.
+3. **Pages**: das Verzeichnis `web/` samt frischer `data/spots.json` wird veröffentlicht.
+4. **Image**: Container-Image mit eingebackenem Datenbestand nach `ghcr.io`.
+
+**GitHub-Eigenheit, die hier zählt:** geplante Läufe starten ausschließlich auf dem
+**Standard-Branch**. Solange dieser Branch nicht der Standard ist oder dorthin gemerged wurde,
+feuert der Zeitplan nicht. Von Hand über "Run workflow" geht es trotzdem.
+
+## Container
+
+```bash
+docker build -t whopper-watt .
+docker run -p 8000:8000 whopper-watt
+# oder fertig aus der Registry
+docker run -p 8000:8000 ghcr.io/diesteinhose/enbe-plus-whopper:latest
+```
+
+Kein Build-Schritt, keine Abhängigkeiten: Python plus ein paar hundert Kilobyte eigener Code
+und der Datenbestand. Läuft als eigener Nutzer, mit Healthcheck auf `/api/meta`, und
+`--trust-proxy` ist gesetzt, weil ein Container praktisch immer hinter einem Reverse Proxy
+steht. Ohne Proxy davor gehört das Flag weg, sonst sieht der Server nur die Docker-Bridge und
+die Bremse pro Client wird zur Bremse für alle.
+
+`docker-compose.yml` hängt zusätzlich `server/data` als Volume ein, damit der Bestand ohne
+Neubau aktualisiert werden kann.
+
 ## Tests
 
 ```bash

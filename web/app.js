@@ -1,4 +1,35 @@
 import { evaluateOpeningHours } from './opening-hours.js';
+import { decodePolyline } from './geo.js';
+import { serverBackend } from './server-backend.js';
+import { localBackend } from './local-search.js';
+
+// Zwei Betriebsarten aus einem Quellstand: mit Server (SQLite, Cache, eigene
+// Instanz) oder ohne (GitHub Pages, alles im Browser). Erkannt wird es daran,
+// ob es den Server ueberhaupt gibt.
+let backend = serverBackend;
+
+async function pickBackend() {
+  // Der eigene Server schickt einen Kennungs-Header mit. Fehlt er, liegt die App
+  // auf einer reinen Dateiablage wie GitHub Pages und rechnet selbst.
+  let hasServer = false;
+  try {
+    const probe = await fetch('.', { method: 'HEAD' });
+    hasServer = probe.headers.get('X-Whopper-Backend') === 'server';
+  } catch {
+    hasServer = false;
+  }
+  backend = hasServer ? serverBackend : localBackend;
+  try {
+    return await backend.meta();
+  } catch (error) {
+    // Server da, aber Datenbank kaputt: lieber lokal weitermachen als gar nicht.
+    if (backend === serverBackend) {
+      backend = localBackend;
+      return localBackend.meta();
+    }
+    throw error;
+  }
+}
 
 const state = {
   mode: 'radius',
@@ -80,13 +111,13 @@ function pressed(container, attribute, value) {
 
 // ---- Server ---------------------------------------------------------------
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error || `Server antwortete mit ${response.status}`);
-  }
-  return payload;
+function searchParams() {
+  return {
+    radiusKm: state.radiusKm,
+    corridorM: state.corridorM,
+    gapM: state.gapM,
+    onlyEnbw: state.onlyEnbw,
+  };
 }
 
 async function searchRadius() {
@@ -94,15 +125,12 @@ async function searchRadius() {
   await withLoading(async () => {
     let center;
     if (query) {
-      center = await api(`/api/geocode?q=${encodeURIComponent(query)}`);
+      center = await backend.geocode(query);
     } else {
       const position = await currentPosition();
       center = { lat: position.coords.latitude, lon: position.coords.longitude, label: 'Mein Standort' };
     }
-    const result = await api(
-      `/api/spots?lat=${center.lat}&lon=${center.lon}` +
-      `&radius_km=${state.radiusKm}&gap_m=${state.gapM}&only_enbw=${state.onlyEnbw ? 1 : 0}`,
-    );
+    const result = await backend.radiusSearch(center, searchParams());
     state.center = center;
     state.route = null;
     state.spots = result.spots;
@@ -112,29 +140,24 @@ async function searchRadius() {
 
 async function searchRoute(waypoints, label) {
   await withLoading(async () => {
-    const body = { corridorM: state.corridorM, gapM: state.gapM, onlyEnbw: state.onlyEnbw };
+    const request = {};
     if (waypoints) {
-      body.waypoints = waypoints;
-      body.label = label;
+      request.waypoints = waypoints;
+      request.label = label;
     } else {
       const start = view.startInput.value.trim();
       const destination = view.destinationInput.value.trim();
       if (!destination) throw new Error('Ziel fehlt.');
       if (start) {
-        body.places = [start, destination];
+        request.places = [start, destination];
       } else {
         const position = await currentPosition();
-        body.waypoints = [[position.coords.latitude, position.coords.longitude]];
-        const target = await api(`/api/geocode?q=${encodeURIComponent(destination)}`);
-        body.waypoints.push([target.lat, target.lon]);
-        body.label = `Mein Standort nach ${target.label}`;
+        const target = await backend.geocode(destination);
+        request.waypoints = [[position.coords.latitude, position.coords.longitude], [target.lat, target.lon]];
+        request.label = `Mein Standort nach ${target.label}`;
       }
     }
-    const result = await api('/api/route-spots', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
+    const result = await backend.routeSearch(request, searchParams());
     state.route = result.route;
     state.center = null;
     state.spots = result.spots;
@@ -351,33 +374,6 @@ function pin(kind, glyph) {
   });
 }
 
-// OSRM liefert die Route als Encoded Polyline, das spart gegenueber JSON-Punkten
-// bei 400 km rund 90 Prozent Uebertragung.
-function decodePolyline(encoded, precision = 5) {
-  const factor = 10 ** precision;
-  const points = [];
-  let index = 0;
-  let lat = 0;
-  let lon = 0;
-  while (index < encoded.length) {
-    for (let isLat = 0; isLat < 2; isLat += 1) {
-      let shift = 0;
-      let result = 0;
-      let byte;
-      do {
-        byte = encoded.charCodeAt(index) - 63;
-        index += 1;
-        result |= (byte & 0x1f) << shift;
-        shift += 5;
-      } while (byte >= 0x20);
-      const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
-      if (isLat === 0) lat += delta; else lon += delta;
-    }
-    points.push([lat / factor, lon / factor]);
-  }
-  return points;
-}
-
 // ---- Bedienung ------------------------------------------------------------
 
 document.querySelectorAll('[data-mode]').forEach((button) => {
@@ -485,12 +481,7 @@ view.planInput.addEventListener('change', async () => {
   const file = view.planInput.files?.[0];
   if (!file) return;
   await withLoading(async () => {
-    const form = await file.arrayBuffer();
-    const result = await api(`/api/plan?name=${encodeURIComponent(file.name)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: form,
-    });
+    const result = await backend.readPlan(file);
     if (result.note) setBanner(result.note);
     if (result.waypoints.length < 2) {
       throw new Error(result.note || 'Der Plan enthält keine zwei verwertbaren Punkte.');
@@ -519,17 +510,20 @@ view.installButton.addEventListener('click', async () => {
   view.installButton.hidden = true;
 });
 
+// Relative Pfade ueberall: auf GitHub Pages liegt die App unter einem
+// Unterverzeichnis, absolute Pfade wuerden dort ins Leere zeigen.
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 
 updateDepartureLabel();
 render();
 
-api('/api/meta')
+pickBackend()
   .then((meta) => {
+    const source = backend.mode === 'server' ? 'Server' : 'im Browser';
     view.status.title =
       `${meta.burgers} Filialen, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare` +
-      `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at}`;
+      `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at} · Suche ${source}`;
   })
-  .catch(() => setBanner('Server nicht erreichbar. Angezeigt wird, was im Cache liegt.'));
+  .catch(() => setBanner('Kein Datenbestand erreichbar. Angezeigt wird, was im Cache liegt.'));

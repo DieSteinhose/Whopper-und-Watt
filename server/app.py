@@ -140,6 +140,13 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:  # noqa: BLE001 - der Client soll etwas Lesbares bekommen
             self._error(HTTPStatus.BAD_GATEWAY, f"{type(error).__name__}: {error}")
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        """Nur fuer die Erkennung der Betriebsart: Kopf ohne Koerper."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Length", "0")
+        self._security_headers()
+        self.end_headers()
+
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         started = time.time()
@@ -297,6 +304,10 @@ class Handler(BaseHTTPRequestHandler):
     def _security_headers(self) -> None:
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        # Daran erkennt die PWA, dass sie einen Server hat. Auf GitHub Pages fehlt
+        # der Header, dann rechnet sie selbst. So braucht es keinen Testaufruf ins
+        # Leere, der in jeder Konsole als Fehler stehen wuerde.
+        self.send_header("X-Whopper-Backend", "server")
 
     def _error(self, status: HTTPStatus, message: str) -> None:
         self._json({"ok": False, "error": message}, status)

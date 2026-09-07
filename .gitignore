@@ -16,3 +16,6 @@ server/data/*.sqlite-wal
 server/data/*.sqlite-shm
 __pycache__/
 *.pyc
+
+# Aus der Datenbank erzeugt, gehoert nicht ins Repository.
+web/data/
