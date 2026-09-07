@@ -1,6 +1,6 @@
 name: Nightly
 
-# Jede Nacht: Daten neu einsammeln, Seite veroeffentlichen, Image bauen.
+# Jede Nacht: Daten neu einsammeln und die Seite veroeffentlichen.
 #
 # Achtung, GitHub-Eigenheit: geplante Laeufe starten ausschliesslich auf dem
 # Standard-Branch des Repositories. Solange dieser Branch nicht der Standard ist
@@ -16,7 +16,6 @@ on:
       - "server/**"
       - "web/**"
       - "tests/**"
-      - "Dockerfile"
       - ".github/workflows/nightly.yml"
 
 permissions:
@@ -122,35 +121,3 @@ jobs:
           path: web
       - id: deploy
         uses: actions/deploy-pages@v4
-
-  image:
-    name: Container-Image
-    needs: data
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: datenbestand
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Bauen und veroeffentlichen
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.run_number }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.description=Burger King neben der Ladesaeule
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

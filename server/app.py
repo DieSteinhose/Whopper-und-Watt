@@ -10,8 +10,8 @@ wo Python 3.11 liegt.
 
 Der Standard ist Absicht: an alle Schnittstellen zu binden gehoert eine bewusste
 Entscheidung, kein Vorgabewert. Laeuft der Reverse Proxy auf demselben Rechner,
-reicht 127.0.0.1. Steht er woanders, im Docker-Netz oder auf einem anderen Host,
-braucht es --host 0.0.0.0, sonst meldet er nur, dass niemand antwortet.
+reicht 127.0.0.1. Steht er woanders, in einem eigenen Netz oder auf einem anderen
+Host, braucht es --host 0.0.0.0, sonst meldet er nur, dass niemand antwortet.
 """
 
 from __future__ import annotations

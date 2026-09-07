@@ -138,7 +138,7 @@ die Portierung des Auswerters aus der Android-App, mit denselben Grenzen und den
 | Suche | SQLite auf dem Server | im Browser, aus `data/spots.json` |
 | Geocoding und Routing | über den Server, mit Cache | direkt an Nominatim und OSRM |
 | Offline | Hülle aus dem Cache | Hülle **und Suche** aus dem Cache |
-| Hosting | eigener Rechner, Container | jede Dateiablage, etwa GitHub Pages |
+| Hosting | eigener Rechner | jede Dateiablage, etwa GitHub Pages |
 
 Die App erkennt die Betriebsart selbst: der eigene Server schickt den Header `X-Whopper-Backend`
 mit, auf einer reinen Dateiablage fehlt er. Kein Testaufruf ins Leere, der in jeder
@@ -178,7 +178,10 @@ Deploy-Schritt fehl.
    abzuschalten. Danach eine Plausibilitätsprüfung: unter 300 Filialen oder 1000 Ladesäulen
    bricht der Lauf ab, damit kein halber Bestand online geht.
 3. **Pages**: das Verzeichnis `web/` samt frischer `data/spots.json` wird veröffentlicht.
-4. **Image**: Container-Image mit eingebackenem Datenbestand nach `ghcr.io`.
+
+Bei einem gewöhnlichen Commit auf `pwa` wird nicht neu eingesammelt: das dauert Minuten und
+belastet fremde Server, und für eine Codeänderung verschieben sich keine Ladesäulen. Der Lauf
+nimmt dann den Datenstand aus dem Repository und deployt in Sekunden.
 
 **GitHub-Eigenheit, die hier zählt:** geplante Läufe starten ausschließlich auf dem
 **Standard-Branch**. Der Branch `pwa` muss also der Standard sein, sonst feuert der Zeitplan
@@ -189,24 +192,6 @@ dem Branch `app` fragt OpenStreetMap zur Laufzeit, sie hat gar keinen Datenbesta
 veralten könnte. Ihr Preis dafür sind die 11 bis 459 Sekunden pro Suche, die überhaupt erst
 der Anlass für diese Bauform waren. Eine neue APK entsteht nur, wenn sich ihr Quelltext ändert,
 nicht weil in Bochum eine Ladesäule dazugekommen ist.
-
-## Container
-
-```bash
-docker build -t whopper-watt .
-docker run -p 8000:8000 whopper-watt
-# oder fertig aus der Registry
-docker run -p 8000:8000 ghcr.io/diesteinhose/enbw-plus-whopper:latest
-```
-
-Kein Build-Schritt, keine Abhängigkeiten: Python plus ein paar hundert Kilobyte eigener Code
-und der Datenbestand. Läuft als eigener Nutzer, mit Healthcheck auf `/api/meta`, und
-`--trust-proxy` ist gesetzt, weil ein Container praktisch immer hinter einem Reverse Proxy
-steht. Ohne Proxy davor gehört das Flag weg, sonst sieht der Server nur die Docker-Bridge und
-die Bremse pro Client wird zur Bremse für alle.
-
-`docker-compose.yml` hängt zusätzlich `server/data` als Volume ein, damit der Bestand ohne
-Neubau aktualisiert werden kann.
 
 ## Tests
 
