@@ -241,9 +241,15 @@ main {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
   font-size: 13px;
 }
-.pin.store.bk { background: #c4451e; }
-.pin.store.subway { background: #157a3c; }
-.pin.store-closed { background: #8e8e93; }
-.pin.charger { background: #1b8a4c; }
+/* Fuenf Markerarten auf einer Karte, die auch mal 250 davon zeigt. Die Farben
+   sind deshalb nach Farbton getrennt und nicht nur nach Helligkeit: Subway war
+   vorher #157a3c und damit vom Gruen der Ladesaeule kaum zu unterscheiden, mit
+   zwei veganen Kategorien dazu waeren es vier fast gleiche Gruens geworden. */
+.pin.store.bk { background: #c4451e; }         /* Rot */
+.pin.store.subway { background: #c98a06; }     /* Bernstein */
+.pin.store.vegan { background: #7fae1b; }       /* Limette */
+.pin.store.vegan-only { background: #14622e; }  /* Tannengruen */
+.pin.store-closed { background: #8e8e93; }      /* Grau */
+.pin.charger { background: #1b8a4c; }           /* Gruen, die Saeule */
 
 .leaflet-container { background: var(--bg); }

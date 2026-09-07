@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-"""Schreibt den Datenbestand als eine JSON-Datei fuer den Betrieb ohne Server.
+"""Schreibt den Datenbestand als JSON-Dateien fuer den Betrieb ohne Server.
 
-GitHub Pages liefert nur statische Dateien aus, dort laeuft kein Python. Der
-Datenbestand ist aber klein genug, um ihn komplett in den Browser zu legen:
-rund tausend Filialen mit ihren Ladesaeulen. Die Suche rechnet die PWA dann
-selbst, und zwar auch offline.
+GitHub Pages liefert nur statische Dateien aus, dort laeuft kein Python. Also
+wandert der Datenbestand in den Browser und die Suche rechnet die PWA selbst.
+Enthalten sind nur Lokale mit mindestens einer Ladesaeule in Reichweite; alles
+andere beantwortet die Frage dieser App nicht und waere nur Ballast.
 
-Enthalten sind nur Filialen mit mindestens einer Ladesaeule in Reichweite.
-Alles andere beantwortet die Frage dieser App nicht und waere nur Ballast.
+Geschrieben wird in zwei Teilen, und das ist der Punkt:
+
+  spots.json        die Ketten, gemessen 1651 Lokale, 445 KB gepackt
+  spots-vegan.json  die uebrigen veganen Lokale, 12655 Stueck, 5,0 MB gepackt
+
+In einer Datei waeren das 5,5 MB gepackt und knapp 38 MB entpackt, die jede
+Installation herunterladen und beim Start durch JSON.parse schicken muesste,
+auch wenn nur nach Burger King gesucht wird. Die Voreinstellung laedt deshalb
+nur den kleinen Teil. Der grosse kommt erst, wenn jemand eine vegane Kategorie
+anhakt, und liegt danach im Cache.
 
     python3 server/export_static.py --db server/data/whopper.sqlite --out web/data/spots.json
 """
@@ -23,13 +31,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from geo import BRANDS  # noqa: E402
+from db import spot_payload  # noqa: E402
+
+# Der Zusatzteil heisst wie die Hauptdatei, nur mit diesem Anhaengsel.
+VEGAN_SUFFIX = "-vegan"
 
 
-def export(db_path: Path, out_path: Path) -> dict:
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
-
+def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     chargers: dict[str, list[dict]] = {}
     query = (
         "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.is_enbw,"
@@ -51,44 +59,57 @@ def export(db_path: Path, out_path: Path) -> dict:
                 "gapM": round(row["gap_m"]),
             }
         )
+    return chargers
 
-    spots = []
+
+def _write(path: Path, payload: dict) -> tuple[int, int]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    path.write_bytes(text)
+    return len(text), len(gzip.compress(text, 9))
+
+
+def export(db_path: Path, out_path: Path) -> dict:
+    """Schreibt beide Teile und gibt den vollstaendigen Bestand zurueck."""
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    chargers = _chargers_by_store(connection)
+
+    parts: dict[str, list[dict]] = {"base": [], "vegan": []}
     for row in connection.execute("SELECT * FROM store ORDER BY id"):
         near = chargers.get(row["id"])
         if not near:
-            continue  # Filiale ohne Saeule beantwortet die Frage nicht.
-        brand = BRANDS.get(row["brand"])
-        spots.append(
-            {
-                "id": row["id"],
-                "brand": row["brand"],
-                "brandLabel": brand.label if brand else row["brand"],
-                "lat": round(row["lat"], 6),
-                "lon": round(row["lon"], 6),
-                "name": row["name"] or (brand.label if brand else "Filiale"),
-                "address": row["address"],
-                "openingHours": row["opening_hours"],
-                "chargers": near,
-            }
-        )
+            continue  # Ein Lokal ohne Saeule beantwortet die Frage nicht.
+        # Derselbe Bauplan wie im Server. Ein Feld, das nur eine der beiden
+        # Betriebsarten mitliefert, faellt sonst genau dort auf die Nase, wo
+        # niemand hinschaut. Hier war schon einmal ein Link nach undefined.
+        spot = spot_payload(row, near)
+        spot["lat"] = round(spot["lat"], 6)
+        spot["lon"] = round(spot["lon"], 6)
+        # Die Ketten kommen in den Grundteil, alles andere in den Zusatzteil.
+        # Ein Lokal steckt in genau einer Datei, doppelt geladen wird nichts.
+        parts["base" if row["brand"] else "vegan"].append(spot)
 
     meta = {key: value for key, value in connection.execute("SELECT key, value FROM meta")}
-    meta["spots"] = len(spots)
-    payload = {"meta": meta, "spots": spots}
+    meta["spots"] = len(parts["base"]) + len(parts["vegan"])
+    meta["baseSpots"] = len(parts["base"])
+    meta["veganSpots"] = len(parts["vegan"])
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    out_path.write_text(text, encoding="utf-8")
+    vegan_path = out_path.with_name(f"{out_path.stem}{VEGAN_SUFFIX}{out_path.suffix}")
+    written = {
+        out_path: {"meta": meta, "part": "base", "spots": parts["base"]},
+        vegan_path: {"meta": meta, "part": "vegan", "spots": parts["vegan"]},
+    }
+    for path, payload in written.items():
+        plain, packed = _write(path, payload)
+        print(
+            f"{path}: {len(payload['spots'])} Lokale mit "
+            f"{sum(len(spot['chargers']) for spot in payload['spots'])} Saeulen, "
+            f"{plain / 1024:.0f} KB, gepackt {packed / 1024:.0f} KB",
+            flush=True,
+        )
 
-    plain = len(text.encode("utf-8"))
-    packed = len(gzip.compress(text.encode("utf-8"), 9))
-    print(
-        f"{out_path}: {len(spots)} Filialen mit "
-        f"{sum(len(spot['chargers']) for spot in spots)} Saeulen, "
-        f"{plain / 1024:.0f} KB, gepackt {packed / 1024:.0f} KB",
-        flush=True,
-    )
-    return payload
+    return {"meta": meta, "spots": parts["base"] + parts["vegan"]}
 
 
 def main() -> int:

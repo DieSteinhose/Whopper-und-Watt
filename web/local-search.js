@@ -1,9 +1,15 @@
 // Betrieb ohne Server: alles rechnet der Browser.
 //
-// Auf GitHub Pages laeuft kein Python. Der Datenbestand ist aber klein genug
-// (rund tausend Filialen, gepackt gut 200 KB), um ihn einmal zu laden und die
-// Suche lokal zu machen. Das ist nebenbei die ehrlichere PWA: nach dem ersten
-// Laden funktioniert die Suche auch offline.
+// Auf GitHub Pages laeuft kein Python. Der Datenbestand wandert deshalb in den
+// Browser, und die Suche laeuft lokal. Das ist nebenbei die ehrlichere PWA:
+// nach dem ersten Laden funktioniert die Suche auch offline.
+//
+// Der Bestand kommt in zwei Teilen. Die Ketten (spots.json, 1651 Lokale,
+// gepackt 445 KB) werden immer geladen, die uebrigen veganen Lokale
+// (spots-vegan.json, 12655 Lokale, gepackt 5,0 MB) erst, wenn jemand eine
+// vegane Kategorie anhakt. In einer Datei waeren es 5,5 MB gepackt und 38 MB
+// entpackt, die jede Installation beim Start holen und durch JSON.parse
+// schicken muesste, auch fuer eine Suche nach Burger King.
 //
 // Geocoding und Routing gehen dann direkt an Nominatim und OSRM. Beide erlauben
 // das per CORS. Ohne Server gibt es keinen gemeinsamen Cache mehr, dafuer trifft
@@ -17,22 +23,45 @@ import {
   routeMatch,
 } from './geo.js';
 
-const DATA_URL = 'data/spots.json';
+const BASE_URL = 'data/spots.json';
+const VEGAN_URL = 'data/spots-vegan.json';
 const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
 const OSRM = 'https://router.project-osrm.org';
 const ROUTE_SAMPLE_STEP_M = 2000;
 const MAX_UNPACKED_BYTES = 8 * 1024 * 1024;
 
-let dataPromise = null;
+const parts = new Map();
 
-function load() {
-  if (!dataPromise) {
-    dataPromise = fetch(DATA_URL).then((response) => {
+function fetchPart(url) {
+  if (!parts.has(url)) {
+    parts.set(url, fetch(url).then((response) => {
       if (!response.ok) throw new Error(`Datenbestand nicht ladbar (${response.status})`);
       return response.json();
-    });
+    }).catch((error) => {
+      // Sonst bliebe ein einmaliger Netzfehler fuer immer als abgelehntes
+      // Promise haengen und jede spaetere Suche scheiterte an ihm.
+      parts.delete(url);
+      throw error;
+    }));
   }
-  return dataPromise;
+  return parts.get(url);
+}
+
+/** Braucht diese Auswahl den grossen Zusatzteil? */
+function needsVeganPart(kinds) {
+  return (kinds ?? []).some((key) => key === 'vegan' || key === 'vegan_only');
+}
+
+let merged = null;
+
+async function load(kinds) {
+  const base = await fetchPart(BASE_URL);
+  if (!needsVeganPart(kinds)) return base;
+  if (!merged) {
+    const vegan = await fetchPart(VEGAN_URL);
+    merged = { ...base, spots: base.spots.concat(vegan.spots) };
+  }
+  return merged;
 }
 
 function usableChargers(spot, gapM, onlyEnbw) {
@@ -41,28 +70,38 @@ function usableChargers(spot, gapM, onlyEnbw) {
   );
 }
 
-// Ohne Angabe bleibt es bei der Voreinstellung des Datenbestands, sonst waere
-// eine alte gespeicherte Auswahl schlimmer als gar keine.
-function wantedBrand(spot, brands) {
-  if (!brands || brands.length === 0) return false;
-  return brands.includes(spot.brand ?? 'bk');
+// Dieselben Bedingungen wie KIND_CONDITIONS im Server. Die Kategorien sind ein
+// Oder, und ein Lokal kann in mehreren liegen: ein Burger King ist immer auch
+// "vegane Optionen", weil die Kette das Produkt bundesweit fuehrt und das
+// OSM-Tag an ihren Filialen luecken- und stellenweise veraltet ist.
+const KIND_TESTS = {
+  bk: (spot) => spot.brand === 'bk',
+  subway: (spot) => spot.brand === 'subway',
+  vegan: (spot) => spot.vegan === true,
+  vegan_only: (spot) => spot.veganOnly === true,
+};
+
+// Nichts angehakt heisst nichts gesucht, nicht heimlich alles.
+export function wantedKind(spot, kinds) {
+  if (!kinds || kinds.length === 0) return false;
+  return kinds.some((key) => KIND_TESTS[key]?.(spot) === true);
 }
 
 export const localBackend = {
   mode: 'local',
 
   async meta() {
-    const data = await load();
+    const data = await fetchPart(BASE_URL);
     return { ...data.meta, ok: true };
   },
 
   async radiusSearch(center, params) {
     const started = performance.now();
-    const data = await load();
+    const data = await load(params.kinds);
     const radiusM = params.radiusKm * 1000;
     const spots = [];
     for (const spot of data.spots) {
-      if (!wantedBrand(spot, params.brands)) continue;
+      if (!wantedKind(spot, params.kinds)) continue;
       const distance = haversineM(center.lat, center.lon, spot.lat, spot.lon);
       if (distance > radiusM) continue;
       const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);
@@ -99,7 +138,7 @@ export const localBackend = {
   },
 
   async spotsAlongRoute(computed, params) {
-    const data = await load();
+    const data = await load(params.kinds);
     // Fuer den Abstand reicht eine ausgeduennte Linie, das spart je Filiale
     // tausende Segmentvergleiche.
     const thin = resample(computed.points, computed.cumulativeSeconds, ROUTE_SAMPLE_STEP_M);
@@ -107,7 +146,7 @@ export const localBackend = {
 
     const spots = [];
     for (const spot of data.spots) {
-      if (!wantedBrand(spot, params.brands)) continue;
+      if (!wantedKind(spot, params.kinds)) continue;
       const match = routeMatch(thin.points, cumulative, thin.seconds, spot.lat, spot.lon);
       if (match.offsetM > params.corridorM) continue;
       const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);

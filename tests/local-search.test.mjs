@@ -7,18 +7,25 @@ import path from 'node:path';
 // Die Suche im Browser laedt ihren Datenbestand per fetch. Fuer den Test kommt
 // er vom Dateisystem, sonst ist es dieselbe Codebasis wie auf GitHub Pages.
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const DATA = path.join(ROOT, 'web/data/spots.json');
+// Zwei Teile wie im echten Betrieb: die Ketten immer, die uebrigen veganen
+// Lokale nur, wenn die Suche sie anfordert.
+const DATA = ['web/data/spots.json', 'web/data/spots-vegan.json'];
 
 let dataAvailable = true;
-try {
-  await readFile(DATA);
-} catch {
-  dataAvailable = false;
+for (const relative of DATA) {
+  try {
+    await readFile(path.join(ROOT, relative));
+  } catch {
+    dataAvailable = false;
+  }
 }
 
+const fetched = [];
 globalThis.fetch = async (url) => {
-  if (String(url).endsWith('spots.json')) {
-    const text = await readFile(DATA, 'utf8');
+  const relative = DATA.find((item) => String(url).endsWith(path.basename(item)));
+  if (relative) {
+    fetched.push(path.basename(relative));
+    const text = await readFile(path.join(ROOT, relative), 'utf8');
     return { ok: true, json: async () => JSON.parse(text) };
   }
   throw new Error(`Im Test nicht erlaubt: ${url}`);
@@ -29,7 +36,7 @@ const { localBackend, parseGpx, isAddress, isPlaceholder, columnAFromSheet, thin
 
 const DORTMUND = { lat: 51.5142, lon: 7.4653 };
 const STUTTGART = { lat: 48.7758, lon: 9.1829 };
-const params = { brands: ['bk'], radiusKm: 25, corridorM: 3000, gapM: 300, onlyEnbw: true };
+const params = { kinds: ['bk'], radiusKm: 25, corridorM: 3000, gapM: 300, onlyEnbw: true };
 
 // Eine gerade Linie reicht: geprueft wird die Auswahllogik, nicht der Router.
 function straightRoute(from, to, steps = 200) {
@@ -59,6 +66,11 @@ test('Umkreissuche liefert nur Treffer im Radius, sortiert nach Entfernung', { s
   }
   const distances = result.spots.map((spot) => spot.distanceM);
   assert.deepEqual(distances, [...distances].sort((a, b) => a - b));
+
+  // Eine Suche nach Burger King darf den grossen Zusatzteil nicht anfassen.
+  // Genau das ist der Grund fuer die Aufteilung: gepackt 445 KB statt 5,5 MB.
+  assert.ok(fetched.includes('spots.json'));
+  assert.ok(!fetched.includes('spots-vegan.json'), 'Zusatzteil ohne Not geladen');
 });
 
 test('Der EnBW-Filter kann nur weniger finden, nie mehr', { skip: !dataAvailable }, async () => {
@@ -145,9 +157,9 @@ test('Ausduennen behaelt Anfang und Ende', () => {
 
 test('Ketten sind einzeln waehlbar und kombinierbar', { skip: !dataAvailable }, async () => {
   const wide = { ...params, radiusKm: 100, onlyEnbw: false };
-  const burgerKing = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['bk'] });
-  const subway = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['subway'] });
-  const both = await localBackend.radiusSearch(DORTMUND, { ...wide, brands: ['bk', 'subway'] });
+  const burgerKing = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk'] });
+  const subway = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['subway'] });
+  const both = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk', 'subway'] });
 
   assert.ok(burgerKing.spots.length > 0, 'kein Burger King im 100-km-Umkreis');
   assert.ok(subway.spots.length > 0, 'kein Subway im 100-km-Umkreis');
@@ -158,13 +170,49 @@ test('Ketten sind einzeln waehlbar und kombinierbar', { skip: !dataAvailable }, 
   assert.equal(new Set(both.spots.map((spot) => spot.id)).size, both.spots.length);
 });
 
-test('Burger King ist abwaehlbar, ohne Kette gibt es nichts', { skip: !dataAvailable }, async () => {
-  const none = await localBackend.radiusSearch(DORTMUND, { ...params, brands: [] });
+test('Burger King ist abwaehlbar, ohne Auswahl gibt es nichts', { skip: !dataAvailable }, async () => {
+  const none = await localBackend.radiusSearch(DORTMUND, { ...params, kinds: [] });
   assert.equal(none.spots.length, 0);
+  const unknown = await localBackend.radiusSearch(DORTMUND, { ...params, kinds: ['mcdonalds'] });
+  assert.equal(unknown.spots.length, 0);
 });
 
-test('Auch entlang der Route wirkt die Kettenauswahl', { skip: !dataAvailable }, async () => {
+test('Auch entlang der Route wirkt die Auswahl', { skip: !dataAvailable }, async () => {
   const route = straightRoute(DORTMUND, STUTTGART);
-  const subway = await localBackend.spotsAlongRoute(route, { ...params, brands: ['subway'], onlyEnbw: false });
+  const subway = await localBackend.spotsAlongRoute(route, { ...params, kinds: ['subway'], onlyEnbw: false });
   assert.ok(subway.every((spot) => spot.brand === 'subway'));
 });
+
+test('Vegane Kategorien schliessen die Ketten ein, rein vegan ist eine Teilmenge',
+  { skip: !dataAvailable }, async () => {
+    const wide = { ...params, radiusKm: 100, onlyEnbw: false };
+    const vegan = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['vegan'] });
+    const veganOnly = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['vegan_only'] });
+    const chains = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk', 'subway'] });
+
+    assert.ok(vegan.spots.length > 0, 'nichts mit veganen Optionen im 100-km-Umkreis');
+    assert.ok(vegan.spots.every((spot) => spot.vegan === true));
+    assert.ok(veganOnly.spots.every((spot) => spot.veganOnly === true));
+
+    // Rein vegan ist immer auch vegan, und die Ketten zaehlen immer mit,
+    // unabhaengig davon, was am einzelnen Laden getaggt ist.
+    const veganIds = new Set(vegan.spots.map((spot) => spot.id));
+    for (const spot of veganOnly.spots) assert.ok(veganIds.has(spot.id), spot.id);
+    for (const spot of chains.spots) assert.ok(veganIds.has(spot.id), spot.id);
+  });
+
+test('Kombinierte Auswahl liefert jedes Lokal genau einmal', { skip: !dataAvailable }, async () => {
+  const wide = { ...params, radiusKm: 100, onlyEnbw: false, kinds: ['bk', 'vegan', 'vegan_only'] };
+  const result = await localBackend.radiusSearch(DORTMUND, wide);
+  assert.equal(new Set(result.spots.map((spot) => spot.id)).size, result.spots.length);
+});
+
+test('Der Zusatzteil wird genau einmal geladen und dann wiederverwendet',
+  { skip: !dataAvailable }, async () => {
+    const wide = { ...params, radiusKm: 50, onlyEnbw: false, kinds: ['vegan'] };
+    await localBackend.radiusSearch(DORTMUND, wide);
+    await localBackend.radiusSearch(STUTTGART, wide);
+    const count = (name) => fetched.filter((item) => item === name).length;
+    assert.equal(count('spots.json'), 1);
+    assert.equal(count('spots-vegan.json'), 1);
+  });

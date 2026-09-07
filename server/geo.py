@@ -31,12 +31,41 @@ BRANDS: dict[str, Brand] = {
     "subway": Brand("subway", "Subway", "Q244457", ("Subway",)),
 }
 
-# Burger King ist die Voreinstellung, alles andere waehlt man dazu.
-DEFAULT_BRANDS = ("bk",)
-
 # Ohne Wikidata-Treffer wird der Name nur bei Essensschuppen geglaubt. Sonst
 # waere jeder U-Bahn-Zugang namens "Subway" eine Filiale.
 FOOD_AMENITIES = frozenset({"fast_food", "restaurant", "cafe"})
+
+AMENITY_LABELS = {"restaurant": "Restaurant", "fast_food": "Imbiss", "cafe": "Café"}
+
+# diet:vegan ist das etablierte Tag dafuer, ob es vegan etwas zu essen gibt.
+# "only" heisst rein vegan, "limited" heisst eine Handvoll Gerichte.
+VEGAN_OPTION_VALUES = frozenset({"yes", "only", "limited"})
+VEGAN_ONLY_VALUE = "only"
+
+
+@dataclass(frozen=True)
+class Kind:
+    """Eine Kategorie, die in der App an- und abwaehlbar ist.
+
+    Ketten und Ernaehrungsform stehen bewusst nebeneinander in einer Liste,
+    denn aus Sicht der Benutzung sind sie dasselbe: ein Knopf, der Treffer
+    dazuholt. Ein Lokal kann in mehreren Kategorien liegen, ein Burger King
+    ist beides.
+    """
+
+    key: str
+    label: str
+
+
+KINDS: dict[str, Kind] = {
+    "bk": Kind("bk", "Burger King"),
+    "subway": Kind("subway", "Subway"),
+    "vegan": Kind("vegan", "Vegane Optionen"),
+    "vegan_only": Kind("vegan_only", "Rein vegan"),
+}
+
+# Burger King ist die Voreinstellung, alles andere waehlt man dazu.
+DEFAULT_KINDS = ("bk",)
 
 # EnBW als Betreiber: die Schreibweisen in OSM sind uneinheitlich.
 _ENBW_KEYS = ("operator", "network", "brand", "owner", "name", "operator:short")
@@ -102,11 +131,33 @@ def brand_of(tags: dict) -> Brand | None:
     return None
 
 
-def parse_brands(raw: str | None) -> list[Brand]:
-    """Kommaliste von Markenschluesseln, unbekannte werden ignoriert."""
+def _diet_vegan(tags: dict) -> str:
+    return (tags.get("diet:vegan") or "").strip().lower()
+
+
+def has_vegan_options(tags: dict) -> bool:
+    """Gibt es hier laut OSM vegan etwas zu essen?
+
+    Bewusst nur die drei positiven Werte. "no" und ein fehlendes Tag sind
+    beide ein Nein, aber ein sehr unterschiedlich starkes: bei knapp einem
+    Zehntel der deutschen Gastronomie ist das Tag ueberhaupt gesetzt.
+    """
+    return _diet_vegan(tags) in VEGAN_OPTION_VALUES
+
+
+def is_vegan_only(tags: dict) -> bool:
+    """Rein vegan, also kein Tier auf der Karte. Genau das meint diet:vegan=only."""
+    return _diet_vegan(tags) == VEGAN_ONLY_VALUE
+
+
+def parse_kinds(raw: str | None) -> list[Kind]:
+    """Kommaliste von Kategorieschluesseln, unbekannte werden ignoriert."""
     keys = [key.strip().lower() for key in (raw or "").split(",") if key.strip()]
-    chosen = [BRANDS[key] for key in keys if key in BRANDS]
-    return chosen or [BRANDS[key] for key in DEFAULT_BRANDS]
+    chosen: list[Kind] = []
+    for key in keys:
+        if key in KINDS and KINDS[key] not in chosen:
+            chosen.append(KINDS[key])
+    return chosen or [KINDS[key] for key in DEFAULT_KINDS]
 
 
 _POWER_VALUE = re.compile(r"[0-9]+(\.[0-9]+)?")

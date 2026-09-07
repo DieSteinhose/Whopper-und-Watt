@@ -5,14 +5,20 @@ Der Sinn der Uebung: die Live-Abfragen gegen Overpass dauerten je nach Serverlas
 zwischen 10 Sekunden und mehreren Minuten und wurden regelmaessig mit HTTP 429
 oder 504 abgewiesen. Einmal einsammeln, danach lokal beantworten.
 
-Zwei Schritte, weil Burger King selten und Ladesaeulen haeufig sind:
-  1. Alle Filialen im Suchbereich (eine Abfrage ueber eine Bounding-Box).
-  2. Ladesaeulen in kleinen Boxen um genau diese Filialen, in Bloecken zu 20.
+Zwei Schritte:
+  1. Lokale: die Ketten ueber brand:wikidata, dazu alles mit einem diet:vegan-Tag.
+  2. Ladesaeulen in einem festen Raster ueber den Suchbereich.
 
-Schritt 2 sind rund fuenfzig Abfragen. Auf einer gut gelaunten Instanz dauert das
-wenige Minuten, auf einer ausgelasteten deutlich laenger, und zwischendurch weisen
-die oeffentlichen Instanzen Abfragen ab. Deshalb ist der Lauf fortsetzbar: jeder
-erledigte Block wird sofort festgeschrieben, ein Neustart macht dort weiter.
+Schritt 2 lief frueher in kleinen Boxen um jede einzelne Filiale. Das war richtig,
+solange es um knapp zweitausend Filialen ging. Mit den veganen Lokalen sind es
+ueber fuenfzehntausend, und daraus waeren rund achthundert Abfragen geworden. Ein
+Raster ueber Deutschland sind dagegen etwa sechzig, unabhaengig davon, wie viele
+Lokale dazukommen. Gemessen: 58335 Ladesaeulen liegen in der Bounding-Box,
+von denen 25456 in Reichweite eines Lokals liegen und gespeichert bleiben.
+
+Die oeffentlichen Instanzen weisen Abfragen zwischendurch ab, deshalb ist der Lauf
+fortsetzbar: jede erledigte Rasterzelle wird sofort festgeschrieben, ein Neustart
+macht dort weiter.
 
     python3 server/ingest.py --db server/data/whopper.sqlite
 """
@@ -35,13 +41,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from geo import (  # noqa: E402
     BRANDS,
-    DEFAULT_BRANDS,
+    FOOD_AMENITIES,
     Brand,
     address_of,
-    box_around,
-    chunked,
+    has_vegan_options,
     haversine_m,
     is_enbw,
+    is_vegan_only,
+    lat_degrees_for_meters,
+    lon_degrees_for_meters,
     matches_brand,
     max_power_kw,
 )
@@ -57,8 +65,11 @@ ENDPOINTS = (
 )
 USER_AGENT = "WhopperUndWatt/2.0 (PWA-Ingest; OpenStreetMap-Daten via Overpass)"
 
-STORES_PER_BLOCK = 20
 CHARGER_SEARCH_M = 1000
+# Zellen je Achse. Acht mal acht sind 64 Zellen ueber Deutschland, von denen die
+# ueber Nord- und Ostsee wegfallen. Pro Zelle rund tausend Saeulen, das beantwortet
+# jede Instanz ohne Zeitueberschreitung.
+CHARGER_GRID = 8
 
 # Deutschland mit etwas Rand. Bewusst grosszuegig: eine Filiale kurz hinter der
 # Grenze ist fuer die Frage genauso brauchbar wie eine kurz davor.
@@ -69,7 +80,10 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS store (
     id TEXT PRIMARY KEY,
-    brand TEXT NOT NULL,
+    brand TEXT,
+    amenity TEXT,
+    vegan INTEGER NOT NULL DEFAULT 0,
+    vegan_only INTEGER NOT NULL DEFAULT 0,
     lat REAL NOT NULL,
     lon REAL NOT NULL,
     name TEXT,
@@ -100,9 +114,26 @@ CREATE TABLE IF NOT EXISTS pair (
 CREATE INDEX IF NOT EXISTS pair_by_store ON pair(store_id, gap_m);
 
 -- Fortschritt des Ladesaeulen-Schritts, damit ein Abbruch nichts kostet.
-CREATE TABLE IF NOT EXISTS ingest_block (block INTEGER PRIMARY KEY, done_at TEXT NOT NULL);
+-- Der Schluessel enthaelt die Rastergroesse, damit ein Lauf mit anderem Raster
+-- nicht faelschlich die alten Zellen als erledigt liest.
+CREATE TABLE IF NOT EXISTS ingest_cell (cell TEXT PRIMARY KEY, done_at TEXT NOT NULL);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS store_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
+"""
+
+# Spalten, die spaeter dazugekommen sind. Eine bestehende Datenbank soll nicht
+# weggeworfen werden muessen, nur weil die veganen Lokale dazugekommen sind.
+ADDED_STORE_COLUMNS = {
+    "amenity": "TEXT",
+    "vegan": "INTEGER NOT NULL DEFAULT 0",
+    "vegan_only": "INTEGER NOT NULL DEFAULT 0",
+}
+
+# Erst nach der Migration, denn ein Index auf einer Spalte, die es in einer
+# aelteren Datenbank noch nicht gibt, laesst sich nicht anlegen.
+SCHEMA_INDEXES = """
+CREATE INDEX IF NOT EXISTS store_by_vegan ON store(vegan);
+CREATE INDEX IF NOT EXISTS store_by_vegan_only ON store(vegan_only);
 """
 
 
@@ -111,7 +142,22 @@ def connect(path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     connection.executescript(SCHEMA)
+    migrate(connection)
+    connection.executescript(SCHEMA_INDEXES)
     return connection
+
+
+def migrate(connection: sqlite3.Connection) -> list[str]:
+    """Fehlende Spalten nachziehen. Gibt zurueck, was ergaenzt wurde."""
+    present = {row["name"] for row in connection.execute("PRAGMA table_info(store)")}
+    added = []
+    for column, definition in ADDED_STORE_COLUMNS.items():
+        if column not in present:
+            connection.execute(f"ALTER TABLE store ADD COLUMN {column} {definition}")
+            added.append(column)
+    if added:
+        connection.commit()
+    return added
 
 
 def overpass(query: str, timeout: int = 300, attempts: int = 4) -> dict:
@@ -162,7 +208,7 @@ def element_point(element: dict) -> tuple[float, float] | None:
     return None
 
 
-def store_query(prelude: str, selector: str, brands: Sequence[Brand]) -> str:
+def chain_query(prelude: str, selector: str, brands: Sequence[Brand]) -> str:
     clauses = []
     for brand in brands:
         clauses.append(f'  nwr["brand:wikidata"="{brand.wikidata}"]{selector};')
@@ -178,14 +224,29 @@ def store_query(prelude: str, selector: str, brands: Sequence[Brand]) -> str:
 out center tags;"""
 
 
-def load_stores(
-    connection: sqlite3.Connection,
+def vegan_query(prelude: str, selector: str, amenity: str) -> str:
+    """Alles mit einem diet:vegan-Tag, gefiltert wird danach in Python.
+
+    Auf das Vorhandensein des Tags zu filtern statt auf seine Werte ist die
+    guenstigere Abfrage: diet:vegan haengt in der deutschen Gastronomie an
+    20010 Objekten, amenity=restaurant allein an 138261. Die Instanz greift
+    damit auf den kleinen Index zu. Die 6290 Lokale mit diet:vegan=no kommen
+    dabei unnoetig mit, das ist billiger als eine Wertabfrage mit Alternativen.
+    """
+    return (
+        f"[out:json][timeout:300];\n{prelude}\n"
+        f'nwr["amenity"="{amenity}"]["diet:vegan"]{selector};\n'
+        "out center tags;"
+    )
+
+
+def _fetch_stores(
     bbox: str,
     country: str | None,
     seed: Path | None,
     brands: Sequence[Brand],
-) -> int:
-    """Holt die Filialen, standardmaessig ueber eine Bounding-Box.
+) -> list[dict]:
+    """Holt die Rohdaten, standardmaessig ueber eine Bounding-Box.
 
     Die naheliegendere Variante ueber die Landesflaeche (area["ISO3166-1"="DE"])
     setzt voraus, dass die Overpass-Instanz eine Area-Datenbank hat. Genau die
@@ -193,94 +254,200 @@ def load_stores(
     "runtime error: open64: 2 No such file or directory". Eine Bounding-Box
     versteht dagegen jede Instanz. Der Preis ist ein Ueberhang ins Ausland, und
     ein Burger King fuenfzehn Kilometer hinter der Grenze schadet niemandem.
+
+    Ketten und vegane Lokale werden getrennt abgefragt. Zusammengefasst waere es
+    eine einzige, sehr grosse Antwort, und genau die hat mir eine Instanz schon
+    mitten im Senden abgebrochen. Vier kleinere Abfragen darf der Endpunktwechsel
+    einzeln wiederholen.
     """
     if seed and seed.exists():
-        print(f"Filialen aus {seed}", flush=True)
-        payload = json.loads(seed.read_text())
-    elif country:
-        print(f"Filialen in {country} abfragen (braucht eine Instanz mit Area-Daten)", flush=True)
+        print(f"Lokale aus {seed}", flush=True)
+        return json.loads(seed.read_text()).get("elements", [])
+
+    selector = f"({bbox})"
+    prelude = ""
+    if country:
+        print(f"Ketten in {country} abfragen (braucht eine Instanz mit Area-Daten)", flush=True)
         try:
             # Nur ein Durchgang durch die Endpunkte: fehlende Area-Daten sind kein
             # Ausfall, den Warten heilt, sondern ein Grund fuer die Bounding-Box.
-            payload = overpass(
-                store_query(
-                    f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;',
-                    "(area.searched)",
-                    brands,
-                ),
-                attempts=1,
+            elements = list(
+                overpass(
+                    chain_query(
+                        f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;',
+                        "(area.searched)",
+                        brands,
+                    ),
+                    attempts=1,
+                ).get("elements", [])
             )
+            prelude = f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;'
+            selector = "(area.searched)"
         except RuntimeError as error:
             print(f"  Flaechensuche gescheitert ({error}), weiche auf die Bounding-Box aus", flush=True)
-            payload = overpass(store_query("", f"({bbox})", brands))
+            elements = list(overpass(chain_query("", f"({bbox})", brands)).get("elements", []))
     else:
         print(
-            f"Filialen im Bereich {bbox} abfragen"
-            f" ({', '.join(brand.label for brand in brands)}, dauert einige Minuten)",
+            f"Ketten im Bereich {bbox} abfragen"
+            f" ({', '.join(brand.label for brand in brands)})",
             flush=True,
         )
-        payload = overpass(store_query("", f"({bbox})", brands))
+        elements = list(overpass(chain_query("", selector, brands)).get("elements", []))
 
-    rows = []
-    counts: dict[str, int] = {}
-    for element in payload.get("elements", []):
+    for amenity in sorted(FOOD_AMENITIES):
+        print(f"Lokale mit diet:vegan abfragen ({amenity})", flush=True)
+        elements.extend(overpass(vegan_query(prelude, selector, amenity)).get("elements", []))
+    return elements
+
+
+def load_stores(
+    connection: sqlite3.Connection,
+    bbox: str,
+    country: str | None,
+    seed: Path | None,
+    brands: Sequence[Brand],
+) -> int:
+    """Schreibt Lokale in die Datenbank, mit den Merkmalen fuer die Auswahl.
+
+    Ein Lokal kann in mehreren Kategorien liegen, deshalb sind vegan und
+    vegan_only eigene Spalten und keine Werte von brand. Burger King und Subway
+    gelten immer als "vegane Optionen": beide Ketten fuehren die entsprechenden
+    Produkte bundesweit, waehrend das OSM-Tag an ihren Filialen nur zu 15 bis 21
+    Prozent gesetzt ist und stellenweise noch auf dem Stand vor der
+    Menueumstellung steht. 54 Filialen tragen diet:vegan=no. Dem Tag hier zu
+    folgen hiesse, Treffer wegen veralteter Kartendaten zu verstecken.
+    """
+    elements = _fetch_stores(bbox, country, seed, brands)
+
+    rows: dict[str, tuple] = {}
+    labels: dict[str, str] = {}
+    for element in elements:
         point = element_point(element)
         tags = element.get("tags") or {}
         if not point:
             continue
         brand = next((item for item in brands if matches_brand(tags, item)), None)
-        if brand is None:
-            continue
-        counts[brand.label] = counts.get(brand.label, 0) + 1
-        rows.append(
-            (
-                f"{element.get('type', 'node')}/{element.get('id')}",
-                brand.key,
-                point[0],
-                point[1],
-                tags.get("name") or tags.get("brand"),
-                address_of(tags),
-                tags.get("opening_hours"),
-                json.dumps(tags, ensure_ascii=False),
-            )
+        vegan = has_vegan_options(tags)
+        vegan_only = is_vegan_only(tags)
+        if brand is not None:
+            vegan = True  # Ketten zaehlen immer, siehe Docstring.
+        elif not vegan:
+            continue  # Weder Kette noch vegan: beantwortet die Frage nicht.
+        elif tags.get("amenity") not in FOOD_AMENITIES:
+            continue  # Ein diet:vegan-Tag an einem Kiosk ist kein Lokal.
+
+        # Die Ketten- und die diet:vegan-Abfrage koennen dasselbe Lokal liefern.
+        # Gezaehlt wird deshalb erst zum Schluss, ueber die eindeutigen Zeilen.
+        identifier = f"{element.get('type', 'node')}/{element.get('id')}"
+        labels[identifier] = (
+            brand.label if brand else ("Rein vegan" if vegan_only else "Vegane Optionen")
+        )
+        rows[identifier] = (
+            identifier,
+            brand.key if brand else None,
+            tags.get("amenity"),
+            1 if vegan else 0,
+            1 if vegan_only else 0,
+            point[0],
+            point[1],
+            tags.get("name") or tags.get("brand"),
+            address_of(tags),
+            tags.get("opening_hours"),
+            json.dumps(tags, ensure_ascii=False),
         )
 
+    connection.execute("DELETE FROM store")
     connection.executemany(
-        "INSERT OR REPLACE INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        rows,
+        "INSERT OR REPLACE INTO store"
+        " (id, brand, amenity, vegan, vegan_only, lat, lon, name, address, opening_hours, tags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows.values(),
     )
     connection.commit()
+    counts: dict[str, int] = {}
+    for label in labels.values():
+        counts[label] = counts.get(label, 0) + 1
     summary = ", ".join(f"{count} {label}" for label, count in sorted(counts.items()))
-    print(f"  {len(rows)} Filialen gespeichert ({summary})", flush=True)
+    print(f"  {len(rows)} Lokale gespeichert ({summary})", flush=True)
     return len(rows)
 
 
-def load_chargers(connection: sqlite3.Connection, resume: bool) -> int:
-    stores = connection.execute("SELECT id, lat, lon FROM store ORDER BY id").fetchall()
-    blocks = list(chunked(stores, STORES_PER_BLOCK))
+def grid_cells(bbox: str, grid: int) -> list[tuple[float, float, float, float]]:
+    """Zerlegt die Bounding-Box in grid mal grid Zellen, (south, west, north, east)."""
+    south, west, north, east = (float(part) for part in bbox.split(","))
+    step_lat = (north - south) / grid
+    step_lon = (east - west) / grid
+    return [
+        (
+            south + row * step_lat,
+            west + column * step_lon,
+            south + (row + 1) * step_lat,
+            west + (column + 1) * step_lon,
+        )
+        for row in range(grid)
+        for column in range(grid)
+    ]
+
+
+def cells_with_stores(
+    cells: Sequence[tuple[float, float, float, float]],
+    stores: Sequence[sqlite3.Row],
+    padding_m: float,
+) -> list[int]:
+    """Indizes der Zellen, in denen ueberhaupt ein Lokal liegt.
+
+    Spart die Abfragen ueber Nordsee, Ostsee und die Alpen. Der Rand kommt dazu,
+    damit ein Lokal dicht an der Zellgrenze seine Saeulen jenseits davon behaelt.
+    """
+    pad_lat = lat_degrees_for_meters(padding_m)
+    wanted = []
+    for index, (south, west, north, east) in enumerate(cells):
+        pad_lon = lon_degrees_for_meters(padding_m, (south + north) / 2)
+        if any(
+            south - pad_lat <= store["lat"] <= north + pad_lat
+            and west - pad_lon <= store["lon"] <= east + pad_lon
+            for store in stores
+        ):
+            wanted.append(index)
+    return wanted
+
+
+def load_chargers(connection: sqlite3.Connection, bbox: str, grid: int, resume: bool) -> int:
+    stores = connection.execute("SELECT id, lat, lon FROM store").fetchall()
+    cells = grid_cells(bbox, grid)
+    wanted = cells_with_stores(cells, stores, CHARGER_SEARCH_M)
+
     done = (
-        {row["block"] for row in connection.execute("SELECT block FROM ingest_block")}
+        {row["cell"] for row in connection.execute("SELECT cell FROM ingest_cell")}
         if resume
         else set()
     )
     if not resume:
-        connection.execute("DELETE FROM ingest_block")
+        connection.execute("DELETE FROM ingest_cell")
         connection.commit()
 
-    print(f"Ladesaeulen um {len(stores)} Filialen, {len(blocks)} Bloecke", flush=True)
-    for index, block in enumerate(blocks):
-        if index in done:
+    print(
+        f"Ladesaeulen im Raster {grid}x{grid}: {len(wanted)} von {len(cells)} Zellen"
+        f" enthalten eines der {len(stores)} Lokale",
+        flush=True,
+    )
+    # Der Rand sorgt dafuer, dass eine Saeule knapp jenseits der Zellgrenze zu
+    # einem Lokal knapp diesseits gefunden wird. Die Ueberlappung liefert
+    # Saeulen doppelt, das faengt INSERT OR REPLACE ab.
+    pad_lat = lat_degrees_for_meters(CHARGER_SEARCH_M)
+    for position, index in enumerate(wanted, start=1):
+        key = f"{grid}:{index}"
+        if key in done:
             continue
-        clauses = []
-        for row in block:
-            south, west, north, east = box_around(row["lat"], row["lon"], CHARGER_SEARCH_M)
-            clauses.append(
-                f'  nwr["amenity"="charging_station"]'
-                f"({south:.5f},{west:.5f},{north:.5f},{east:.5f});"
-            )
-        query = "[out:json][timeout:180];\n(\n" + "\n".join(clauses) + "\n);\nout center tags;"
-        print(f"  Block {index + 1}/{len(blocks)}", flush=True)
+        south, west, north, east = cells[index]
+        pad_lon = lon_degrees_for_meters(CHARGER_SEARCH_M, (south + north) / 2)
+        query = (
+            "[out:json][timeout:300];\n"
+            f'nwr["amenity"="charging_station"]({south - pad_lat:.5f},{west - pad_lon:.5f},'
+            f"{north + pad_lat:.5f},{east + pad_lon:.5f});\n"
+            "out center tags;"
+        )
+        print(f"  Zelle {position}/{len(wanted)}", flush=True)
         payload = overpass(query)
 
         rows = []
@@ -309,8 +476,8 @@ def load_chargers(connection: sqlite3.Connection, resume: bool) -> int:
             rows,
         )
         connection.execute(
-            "INSERT OR REPLACE INTO ingest_block (block, done_at) VALUES (?, ?)",
-            (index, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+            "INSERT OR REPLACE INTO ingest_cell (cell, done_at) VALUES (?, ?)",
+            (key, datetime.now(timezone.utc).isoformat(timespec="seconds")),
         )
         connection.commit()
 
@@ -349,6 +516,26 @@ def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
     connection.commit()
     print(f"  {len(rows)} Paare bis {gap_m:.0f} m", flush=True)
     return len(rows)
+
+
+def prune_chargers(connection: sqlite3.Connection) -> int:
+    """Wirft Ladesaeulen weg, die zu keinem Lokal gehoeren.
+
+    Das Raster holt alle Saeulen im Suchbereich, gemessen 58335 in Deutschland.
+    Zu einem Lokal gehoeren davon 25456. Der Rest beantwortet die Frage dieser
+    App nicht und kostet nur Plattenplatz, in Zahlen 66 statt 51 MB.
+
+    Der Preis: ein spaeteres --pairs-only mit groesserem --gap findet die
+    weggeworfenen Saeulen nicht mehr. Wer den Abstand ueber den Wert dieses
+    Laufs hinaus vergroessern will, braucht einen frischen Ingest.
+    """
+    before = connection.execute("SELECT COUNT(*) AS n FROM charger").fetchone()["n"]
+    connection.execute("DELETE FROM charger WHERE id NOT IN (SELECT charger_id FROM pair)")
+    connection.commit()
+    connection.execute("VACUUM")
+    after = connection.execute("SELECT COUNT(*) AS n FROM charger").fetchone()["n"]
+    print(f"  {before - after} Saeulen ohne Lokal verworfen, {after} bleiben", flush=True)
+    return after
 
 
 def build_index(connection: sqlite3.Connection) -> None:
@@ -390,32 +577,57 @@ def main() -> int:
         f" in der App. Moeglich: {', '.join(BRANDS)}",
     )
     parser.add_argument("--gap", type=float, default=1000.0, help="Maximaler Abstand fuer Paare in Metern")
+    parser.add_argument(
+        "--charger-grid",
+        type=int,
+        default=CHARGER_GRID,
+        help="Zellen je Achse fuer den Ladesaeulen-Schritt. Groesser heisst mehr,"
+        " dafuer kleinere Abfragen.",
+    )
     parser.add_argument("--no-resume", action="store_true", help="Ladesaeulen komplett neu holen")
     parser.add_argument("--pairs-only", action="store_true", help="Nur Paare und Index neu bauen")
+    parser.add_argument(
+        "--keep-all-chargers",
+        action="store_true",
+        help="Auch Saeulen behalten, die zu keinem Lokal gehoeren. Kostet Plattenplatz,"
+        " erlaubt dafuer spaeter ein --pairs-only mit groesserem --gap.",
+    )
     arguments = parser.parse_args()
 
     brands = [BRANDS[key.strip()] for key in arguments.brands.split(",") if key.strip() in BRANDS]
     if not brands:
         parser.error(f"Keine bekannte Kette in --brands. Moeglich: {', '.join(BRANDS)}")
+    if arguments.charger_grid < 1:
+        parser.error("--charger-grid braucht mindestens 1")
 
     connection = connect(Path(arguments.db))
     started = time.time()
 
     if not arguments.pairs_only:
         load_stores(connection, arguments.bbox, arguments.country, arguments.stores_json, brands)
-        load_chargers(connection, resume=not arguments.no_resume)
+        load_chargers(
+            connection,
+            arguments.bbox,
+            arguments.charger_grid,
+            resume=not arguments.no_resume,
+        )
 
     print("Paare berechnen", flush=True)
     pairs = build_pairs(connection, arguments.gap)
+    if not arguments.keep_all_chargers:
+        prune_chargers(connection)
     build_index(connection)
 
     counts = {
         name: connection.execute(f"SELECT COUNT(*) AS n FROM {name}").fetchone()["n"]
         for name in ("store", "charger")
     }
-    per_brand = {
-        row["brand"]: row["n"]
-        for row in connection.execute("SELECT brand, COUNT(*) AS n FROM store GROUP BY brand")
+    # Zaehlt je Kategorie, nicht je Zeile: ein Burger King steckt in zweien.
+    per_kind = {
+        "bk": _count(connection, "brand = 'bk'"),
+        "subway": _count(connection, "brand = 'subway'"),
+        "vegan": _count(connection, "vegan = 1"),
+        "vegan_only": _count(connection, "vegan_only = 1"),
     }
     set_meta(
         connection,
@@ -423,19 +635,24 @@ def main() -> int:
         area=arguments.country or f"bbox {arguments.bbox}",
         brands=",".join(brand.key for brand in brands),
         stores=counts["store"],
-        stores_per_brand=json.dumps(per_brand),
+        stores_per_kind=json.dumps(per_kind),
         chargers=counts["charger"],
         pairs=pairs,
         max_gap_m=arguments.gap,
         charger_search_m=CHARGER_SEARCH_M,
+        charger_grid=arguments.charger_grid,
         source="OpenStreetMap via Overpass, ODbL",
     )
     print(
         f"Fertig in {time.time() - started:.0f}s: "
-        f"{counts['store']} Filialen, {counts['charger']} Saeulen, {pairs} Paare",
+        f"{counts['store']} Lokale, {counts['charger']} Saeulen, {pairs} Paare",
         flush=True,
     )
     return 0
+
+
+def _count(connection: sqlite3.Connection, condition: str) -> int:
+    return connection.execute(f"SELECT COUNT(*) AS n FROM store WHERE {condition}").fetchone()["n"]
 
 
 if __name__ == "__main__":

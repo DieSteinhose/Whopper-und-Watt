@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
 
 import app  # noqa: E402
+import db as db_module  # noqa: E402
 import geo  # noqa: E402
 import ingest  # noqa: E402
 import plan  # noqa: E402
@@ -56,11 +57,34 @@ class GeoTest(unittest.TestCase):
         self.assertEqual(geo.brand_of({"brand:wikidata": "Q177054"}), burger_king)
         self.assertIsNone(geo.brand_of({"amenity": "fast_food", "name": "Nordsee"}))
 
-    def test_brand_parsing_falls_back_to_the_default(self):
-        self.assertEqual([b.key for b in geo.parse_brands("subway")], ["subway"])
-        self.assertEqual([b.key for b in geo.parse_brands("bk,subway")], ["bk", "subway"])
-        self.assertEqual([b.key for b in geo.parse_brands("")], list(geo.DEFAULT_BRANDS))
-        self.assertEqual([b.key for b in geo.parse_brands("mcdonalds")], list(geo.DEFAULT_BRANDS))
+    def test_kind_parsing_falls_back_to_the_default(self):
+        self.assertEqual([k.key for k in geo.parse_kinds("subway")], ["subway"])
+        self.assertEqual([k.key for k in geo.parse_kinds("bk,vegan_only")], ["bk", "vegan_only"])
+        self.assertEqual([k.key for k in geo.parse_kinds("bk,bk")], ["bk"])
+        self.assertEqual([k.key for k in geo.parse_kinds("")], list(geo.DEFAULT_KINDS))
+        self.assertEqual([k.key for k in geo.parse_kinds("mcdonalds")], list(geo.DEFAULT_KINDS))
+
+    def test_vegan_tag_reading(self):
+        self.assertTrue(geo.has_vegan_options({"diet:vegan": "yes"}))
+        self.assertTrue(geo.has_vegan_options({"diet:vegan": "limited"}))
+        self.assertTrue(geo.has_vegan_options({"diet:vegan": "only"}))
+        self.assertFalse(geo.has_vegan_options({"diet:vegan": "no"}))
+        self.assertFalse(geo.has_vegan_options({"diet:vegetarian": "yes"}))
+        self.assertFalse(geo.has_vegan_options({}))
+        # Nur "only" heisst rein vegan. Ein rein vegetarisches Lokal mit veganen
+        # Gerichten ist nicht dasselbe und faellt bewusst nicht darunter.
+        self.assertTrue(geo.is_vegan_only({"diet:vegan": "only"}))
+        self.assertFalse(geo.is_vegan_only({"diet:vegan": "yes"}))
+        self.assertFalse(geo.is_vegan_only({"diet:vegetarian": "only", "diet:vegan": "yes"}))
+        # OSM-Werte kommen auch mal mit Grossbuchstaben oder Leerzeichen.
+        self.assertTrue(geo.has_vegan_options({"diet:vegan": " Yes "}))
+
+    def test_kind_filter_only_accepts_known_keys(self):
+        self.assertEqual(db_module.kind_filter([]), "0")
+        self.assertEqual(db_module.kind_filter(["quatsch"]), "0")
+        # Kein Schluessel aus der Anfrage landet je im SQL, nur die feste Bedingung.
+        self.assertEqual(db_module.kind_filter(["'; DROP TABLE store; --", "vegan"]), "s.vegan = 1")
+        self.assertEqual(db_module.kind_filter(["bk", "bk"]), "s.brand = 'bk'")
 
     def test_enbw_detection(self):
         self.assertTrue(geo.is_enbw({"operator": "EnBW mobility+"}))
@@ -108,16 +132,28 @@ class DatabaseTest(unittest.TestCase):
         path = Path(cls._directory.name) / "test.sqlite"
         connection = ingest.connect(path)
 
+        # Die Spalten vegan und vegan_only sind so gesetzt, wie der Ingest sie
+        # setzen wuerde: bei den Ketten pauschal, sonst aus dem OSM-Tag.
         stores = [
-            ("node/1", "bk", *BK_ECHTERDINGEN, "Burger King", "Echterdinger Straße", "24/7"),
-            ("node/2", "bk", 48.7758, 9.1829, "Burger King", "Stuttgart Mitte", "Mo-Su 10:00-22:00"),
-            ("node/3", "bk", 52.5200, 13.4050, "Burger King", "Berlin", None),
-            # Subway direkt neben Filiale 1, an derselben Ladesaeule.
-            ("node/4", "subway", 48.69195, 9.1946, "Subway", "Echterdingen", "Mo-Su 09:00-21:00"),
+            ("node/1", "bk", "fast_food", 1, 0, *BK_ECHTERDINGEN,
+             "Burger King", "Echterdinger Straße", "24/7"),
+            ("node/2", "bk", "fast_food", 1, 0, 48.7758, 9.1829,
+             "Burger King", "Stuttgart Mitte", "Mo-Su 10:00-22:00"),
+            ("node/3", "bk", "fast_food", 1, 0, 52.5200, 13.4050, "Burger King", "Berlin", None),
+            # Subway direkt neben Lokal 1, an derselben Ladesaeule.
+            ("node/4", "subway", "fast_food", 1, 0, 48.69195, 9.1946,
+             "Subway", "Echterdingen", "Mo-Su 09:00-21:00"),
+            # Rein veganes Lokal, ebenfalls an derselben Saeule.
+            ("node/5", None, "restaurant", 1, 1, 48.6920, 9.1947,
+             "Grünzeug", "Echterdingen", "Mo-Sa 11:00-22:00"),
+            # Restaurant mit veganen Optionen, keine Kette, nicht rein vegan.
+            ("node/6", None, "restaurant", 1, 0, 48.69205, 9.19455,
+             "Zum Ochsen", "Echterdingen", "Mo-Su 11:00-23:00"),
         ]
         connection.executemany(
-            "INSERT INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, '{}')",
+            "INSERT INTO store"
+            " (id, brand, amenity, vegan, vegan_only, lat, lon, name, address, opening_hours, tags)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')",
             stores,
         )
         # Saeule 1: EnBW, 50 m neben Filiale 1. Saeule 2: fremd, 60 m neben Filiale 2.
@@ -141,7 +177,7 @@ class DatabaseTest(unittest.TestCase):
 
     def test_radius_search_finds_only_nearby(self):
         spots = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, only_enbw=True, brands=["bk"]
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, only_enbw=True, kinds=["bk"]
         )
         self.assertEqual([spot["id"] for spot in spots], ["node/1"])
         self.assertEqual(spots[0]["chargers"][0]["gapM"], 50)
@@ -150,35 +186,42 @@ class DatabaseTest(unittest.TestCase):
     def test_enbw_filter_hides_foreign_operators(self):
         near_stuttgart = (48.7758, 9.1829)
         only_enbw = self.database.spots_near(
-            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=True, brands=["bk"]
+            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=True, kinds=["bk"]
         )
         everyone = self.database.spots_near(
-            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=False, brands=["bk"]
+            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=False, kinds=["bk"]
         )
         self.assertEqual(only_enbw, [])
         self.assertEqual([spot["id"] for spot in everyone], ["node/2"])
 
     def test_gap_filter(self):
         spots = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, only_enbw=True, brands=["bk"]
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, only_enbw=True, kinds=["bk"]
         )
         self.assertEqual(spots, [])
 
-    def test_brand_selection(self):
-        """Burger King ist Standard, Subway waehlbar, beides zusammen moeglich."""
-        def ids(brands):
-            return [
+    def test_kind_selection(self):
+        """Burger King ist Standard, alles andere waehlbar, alles kombinierbar."""
+        def ids(kinds):
+            return sorted(
                 spot["id"]
                 for spot in self.database.spots_near(
-                    *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, brands=brands
+                    *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, kinds=kinds
                 )
-            ]
+            )
 
         self.assertEqual(ids(["bk"]), ["node/1"])
         self.assertEqual(ids(["subway"]), ["node/4"])
-        self.assertEqual(sorted(ids(["bk", "subway"])), ["node/1", "node/4"])
-        # Ohne Kette gibt es nichts, und das darf kein Fehler sein.
+        self.assertEqual(ids(["bk", "subway"]), ["node/1", "node/4"])
+        self.assertEqual(ids(["vegan_only"]), ["node/5"])
+        # Vegane Optionen holen die Ketten mit: beide fuehren die Produkte
+        # bundesweit, unabhaengig davon, was am einzelnen Laden getaggt ist.
+        self.assertEqual(ids(["vegan"]), ["node/1", "node/4", "node/5", "node/6"])
+        # Ueberschneidende Kategorien liefern jedes Lokal genau einmal.
+        self.assertEqual(ids(["bk", "vegan"]), ["node/1", "node/4", "node/5", "node/6"])
+        # Ohne Auswahl gibt es nichts, und das darf kein Fehler sein.
         self.assertEqual(ids([]), [])
+        self.assertEqual(ids(["unbekannt"]), [])
 
     def test_static_export_has_the_same_fields_as_the_server(self):
         """Der Betrieb ohne Server muss dieselben Felder liefern wie der mit.
@@ -195,7 +238,7 @@ class DatabaseTest(unittest.TestCase):
 
         served = self.database.spots_near(
             *BK_ECHTERDINGEN, radius_m=25_000, gap_m=1000, only_enbw=False,
-            brands=["bk", "subway"],
+            kinds=["bk", "subway", "vegan", "vegan_only"],
         )
         self.assertTrue(served)
         for spot in served:
@@ -205,19 +248,31 @@ class DatabaseTest(unittest.TestCase):
             self.assertEqual(set(spot) - per_query, set(counterpart), spot["id"])
             self.assertEqual(set(spot["chargers"][0]), set(counterpart["chargers"][0]))
 
-    def test_brand_label_travels_with_the_spot(self):
-        spot = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, brands=["subway"]
-        )[0]
-        self.assertEqual(spot["brand"], "subway")
-        self.assertEqual(spot["brandLabel"], "Subway")
+    def test_labels_and_flags_travel_with_the_spot(self):
+        def one(kinds):
+            return self.database.spots_near(
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, kinds=kinds
+            )[0]
+
+        subway = one(["subway"])
+        self.assertEqual(subway["brand"], "subway")
+        self.assertEqual(subway["label"], "Subway")
+        self.assertTrue(subway["vegan"])
+        self.assertFalse(subway["veganOnly"])
+
+        # Ohne Kette benennt die Art des Lokals die Karte, nicht ein leeres Feld.
+        vegan = one(["vegan_only"])
+        self.assertIsNone(vegan["brand"])
+        self.assertEqual(vegan["label"], "Restaurant")
+        self.assertEqual(vegan["name"], "Grünzeug")
+        self.assertTrue(vegan["veganOnly"])
 
     def test_route_search_sorts_by_progress_and_skips_far_away(self):
         # Strecke Echterdingen -> Stuttgart Mitte, Berlin liegt weit daneben.
         points = [BK_ECHTERDINGEN, (48.7758, 9.1829)]
         seconds = [0.0, 900.0]
         spots = self.database.spots_along_route(
-            points=points, seconds=seconds, corridor_m=2000, gap_m=300, only_enbw=False, brands=["bk"]
+            points=points, seconds=seconds, corridor_m=2000, gap_m=300, only_enbw=False, kinds=["bk"]
         )
         self.assertEqual([spot["id"] for spot in spots], ["node/1", "node/2"])
         self.assertLess(spots[0]["routeProgressM"], spots[1]["routeProgressM"])
@@ -227,7 +282,7 @@ class DatabaseTest(unittest.TestCase):
     def test_route_corridor_excludes_detours(self):
         points = [(48.60, 9.19), (48.66, 9.19)]  # endet vor Echterdingen
         spots = self.database.spots_along_route(
-            points=points, seconds=None, corridor_m=1000, gap_m=300, only_enbw=False, brands=["bk"]
+            points=points, seconds=None, corridor_m=1000, gap_m=300, only_enbw=False, kinds=["bk"]
         )
         self.assertEqual(spots, [])
 
@@ -324,6 +379,28 @@ class NetworkExposureTest(unittest.TestCase):
 
 
 class IngestTest(unittest.TestCase):
+    def test_grid_covers_the_bounding_box_without_gaps(self):
+        cells = ingest.grid_cells("47.20,5.80,55.10,15.10", 4)
+        self.assertEqual(len(cells), 16)
+        # Luecken oder Ueberlappungen im Raster hiessen fehlende Ladesaeulen.
+        self.assertAlmostEqual(min(cell[0] for cell in cells), 47.20)
+        self.assertAlmostEqual(min(cell[1] for cell in cells), 5.80)
+        self.assertAlmostEqual(max(cell[2] for cell in cells), 55.10)
+        self.assertAlmostEqual(max(cell[3] for cell in cells), 15.10)
+        covered = sum((cell[2] - cell[0]) * (cell[3] - cell[1]) for cell in cells)
+        self.assertAlmostEqual(covered, (55.10 - 47.20) * (15.10 - 5.80), places=6)
+
+    def test_cells_without_stores_are_skipped(self):
+        cells = ingest.grid_cells("47.00,5.00,55.00,15.00", 2)
+        stores = [{"lat": 48.0, "lon": 6.0}]  # nur die Zelle unten links
+        wanted = ingest.cells_with_stores(cells, stores, padding_m=1000)
+        self.assertEqual(wanted, [0])
+
+        # Ein Lokal knapp jenseits der Zellgrenze zieht die Nachbarzelle mit,
+        # sonst fehlten ihm die Saeulen auf der anderen Seite der Grenze.
+        edge = [{"lat": 50.9999, "lon": 6.0}]
+        self.assertEqual(ingest.cells_with_stores(cells, edge, padding_m=1000), [0, 2])
+
     def test_pairs_are_precomputed_within_gap(self):
         with tempfile.TemporaryDirectory() as directory:
             connection = ingest.connect(Path(directory) / "pairs.sqlite")
@@ -377,10 +454,21 @@ class IngestTest(unittest.TestCase):
             ingest.overpass = original
 
         self.assertEqual(count, 1)
-        self.assertEqual(len(queries), 2)
+        # Erst die Flaechensuche, dann dieselbe Frage per Bounding-Box, danach
+        # je eine Abfrage fuer die drei Gastro-Arten mit diet:vegan.
+        self.assertEqual(len(queries), 2 + len(geo.FOOD_AMENITIES))
         self.assertIn("area.searched", queries[0])
         self.assertIn("47.2,5.8,55.1,15.1", queries[1])
-        self.assertNotIn("area.searched", queries[1])
+        # Nach dem Ausweichen darf keine einzige Abfrage mehr auf die Flaeche
+        # zeigen, sonst laufen die veganen Lokale in denselben Fehler.
+        for query in queries[1:]:
+            self.assertNotIn("area.searched", query)
+            self.assertIn("47.2,5.8,55.1,15.1", query)
+        for amenity in geo.FOOD_AMENITIES:
+            self.assertTrue(
+                any(f'"amenity"="{amenity}"' in query and '"diet:vegan"' in query for query in queries),
+                amenity,
+            )
 
     def test_burger_rows_survive_a_second_ingest(self):
         with tempfile.TemporaryDirectory() as directory:

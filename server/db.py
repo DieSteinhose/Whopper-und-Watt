@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Sequence
 
 from geo import (
+    AMENITY_LABELS,
     BRANDS,
-    DEFAULT_BRANDS,
+    DEFAULT_KINDS,
     box_around,
     cumulative_distances,
     haversine_m,
@@ -25,6 +26,28 @@ from geo import (
 )
 
 ROUTE_SAMPLE_STEP_M = 2000.0
+
+# Jede anwaehlbare Kategorie ist eine Bedingung auf der Tabelle store. Die
+# Auswahl ist ein Oder: wer Subway und rein vegan anhakt, will beides sehen.
+# Ketten und Ernaehrungsform sind bewusst getrennte Spalten, denn ein Lokal
+# kann in mehreren Kategorien liegen. Ein Burger King liegt immer in zweien.
+KIND_CONDITIONS = {
+    "bk": "s.brand = 'bk'",
+    "subway": "s.brand = 'subway'",
+    "vegan": "s.vegan = 1",
+    "vegan_only": "s.vegan_only = 1",
+}
+
+
+def kind_filter(kinds: Sequence[str]) -> str:
+    """SQL-Bedingung fuer die gewaehlten Kategorien.
+
+    Ohne bekannte Kategorie faellt das auf 0 zurueck, also auf keine Treffer.
+    Das ist die ehrliche Antwort auf eine leere Auswahl: nichts angehakt heisst
+    nichts gesucht, nicht heimlich alles.
+    """
+    conditions = [KIND_CONDITIONS[key] for key in dict.fromkeys(kinds) if key in KIND_CONDITIONS]
+    return " OR ".join(conditions) if conditions else "0"
 
 
 class SpotDatabase:
@@ -50,10 +73,10 @@ class SpotDatabase:
         radius_m: float,
         gap_m: float,
         only_enbw: bool,
-        brands: Sequence[str] = DEFAULT_BRANDS,
+        kinds: Sequence[str] = DEFAULT_KINDS,
     ) -> list[dict]:
         south, west, north, east = box_around(lat, lon, radius_m)
-        stores = self._stores_in_box(south, west, north, east, brands)
+        stores = self._stores_in_box(south, west, north, east, kinds)
 
         spots = []
         for store in stores:
@@ -79,7 +102,7 @@ class SpotDatabase:
         corridor_m: float,
         gap_m: float,
         only_enbw: bool,
-        brands: Sequence[str] = DEFAULT_BRANDS,
+        kinds: Sequence[str] = DEFAULT_KINDS,
     ) -> list[dict]:
         if len(points) < 2:
             return []
@@ -98,7 +121,7 @@ class SpotDatabase:
                 min(first[1], second[1]) - pad_lon,
                 max(first[0], second[0]) + pad_lat,
                 max(first[1], second[1]) + pad_lon,
-                brands,
+                kinds,
             ):
                 candidates[store["id"]] = store
 
@@ -129,14 +152,13 @@ class SpotDatabase:
         west: float,
         north: float,
         east: float,
-        brands: Sequence[str],
+        kinds: Sequence[str],
     ):
-        placeholders = ",".join("?" for _ in brands)
         return self._connection.execute(
             "SELECT s.* FROM store s JOIN store_rtree r ON r.rowid = s.rowid"
             " WHERE r.max_lat >= ? AND r.min_lat <= ? AND r.max_lon >= ? AND r.min_lon <= ?"
-            f" AND s.brand IN ({placeholders})",
-            (south, north, west, east, *brands),
+            f" AND ({kind_filter(kinds)})",
+            (south, north, west, east),
         ).fetchall()
 
     def _chargers_for(self, store_id: str, gap_m: float, only_enbw: bool) -> list[dict]:
@@ -165,18 +187,32 @@ class SpotDatabase:
 
     @staticmethod
     def _spot(store: sqlite3.Row, chargers: list[dict]) -> dict:
-        brand = BRANDS.get(store["brand"])
-        return {
-            "id": store["id"],
-            "brand": store["brand"],
-            "brandLabel": brand.label if brand else store["brand"],
-            "name": store["name"] or (brand.label if brand else "Filiale"),
-            "address": store["address"],
-            "lat": store["lat"],
-            "lon": store["lon"],
-            "openingHours": store["opening_hours"],
-            "chargers": chargers,
-        }
+        return spot_payload(store, chargers)
+
+
+def spot_payload(store, chargers: list[dict]) -> dict:
+    """Ein Lokal, wie es an die App geht.
+
+    Bewusst ohne osmUrl: die laesst sich aus der id ableiten, und ein Feld, das
+    nur der Server mitliefert und der statische Export nicht, war schon einmal
+    ein Fehler. Kategoriezugehoerigkeit reist als Flags mit, damit die App einen
+    Burger King mit veganer Option auch als solchen kennzeichnen kann.
+    """
+    brand = BRANDS.get(store["brand"])
+    label = brand.label if brand else AMENITY_LABELS.get(store["amenity"], "Lokal")
+    return {
+        "id": store["id"],
+        "brand": store["brand"],
+        "label": label,
+        "vegan": bool(store["vegan"]),
+        "veganOnly": bool(store["vegan_only"]),
+        "name": store["name"] or label,
+        "address": store["address"],
+        "lat": store["lat"],
+        "lon": store["lon"],
+        "openingHours": store["opening_hours"],
+        "chargers": chargers,
+    }
 
 
 def _resample_with_seconds(

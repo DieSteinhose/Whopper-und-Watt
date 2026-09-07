@@ -29,7 +29,7 @@ export const serverBackend = {
       radius_km: params.radiusKm,
       gap_m: params.gapM,
       only_enbw: params.onlyEnbw ? '1' : '0',
-      brands: (params.brands ?? []).join(','),
+      kinds: (params.kinds ?? []).join(','),
     });
     return api(`api/spots?${query}`);
   },
@@ -45,7 +45,7 @@ export const serverBackend = {
         corridorM: params.corridorM,
         gapM: params.gapM,
         onlyEnbw: params.onlyEnbw,
-        brands: params.brands,
+        kinds: params.kinds,
       }),
     });
   },

@@ -7,7 +7,11 @@
 // Alle Pfade relativ zum Scope: auf GitHub Pages liegt die App unter einem
 // Unterverzeichnis, absolute Pfade zeigten dort ins Leere.
 
-const VERSION = 'whopper-watt-v2';
+// Muss sich bei jeder Aenderung an der Huelle aendern. Der Browser holt einen
+// Service Worker nur neu, wenn sich dessen eigene Bytes unterscheiden; bleibt
+// die Zeile stehen, liefert eine bestehende Installation ewig das alte app.js
+// aus dem Cache aus, egal was deployt wurde.
+const VERSION = 'whopper-watt-v3';
 const SHELL = [
   './',
   'index.html',
@@ -34,6 +38,11 @@ self.addEventListener('install', (event) => {
         await cache.addAll(SHELL);
         // Nur im Betrieb ohne Server vorhanden. Fehlt die Datei, ist das kein Grund,
         // die ganze Installation scheitern zu lassen.
+        //
+        // data/spots-vegan.json wird bewusst NICHT mitinstalliert: gepackt gut
+        // 5 MB, und wer nur nach Burger King sucht, braucht sie nie. Sie landet
+        // beim ersten Abruf im Cache (siehe fetch-Handler) und ist ab dann
+        // ebenfalls offline da.
         await cache.add('data/spots.json').catch(() => {});
       })
       .then(() => self.skipWaiting()),
@@ -64,6 +73,22 @@ self.addEventListener('fetch', (event) => {
           return response;
         })
         .catch(() => caches.match(request).then((cached) => cached || offlineAnswer())),
+    );
+    return;
+  }
+
+  // Der Datenbestand wird beim Abruf mit in den Cache gelegt. Das betrifft vor
+  // allem spots-vegan.json, die zu gross fuer die Vorab-Installation ist: nach
+  // der ersten veganen Suche liegt sie da und die App bleibt offline benutzbar.
+  if (url.pathname.includes('/data/')) {
+    event.respondWith(
+      caches.match(request).then((cached) => cached || fetch(request).then((response) => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(VERSION).then((cache) => cache.put(request, copy));
+        }
+        return response;
+      })),
     );
     return;
   }

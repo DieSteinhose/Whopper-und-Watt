@@ -10,7 +10,10 @@ captures/
 *.apk
 *.keystore
 
-# Server: die Datenbank selbst ist eingecheckt (Stichtag), Begleitdateien nicht.
+# Die Datenbank ist erzeugt und gross (rund 50 MB), sie gehoert nicht ins
+# Repository. Der Workflow haelt sie im Actions-Cache, lokal baut sie
+# server/ingest.py.
+server/data/*.sqlite
 server/data/*.sqlite-journal
 server/data/*.sqlite-wal
 server/data/*.sqlite-shm

@@ -39,8 +39,11 @@ jobs:
           node-version: "22"
       - name: Python-Tests
         run: python3 -m unittest discover -s tests -v
+      # Ohne web/data/spots.json ueberspringt local-search.test.mjs die Tests,
+      # die den Datenbestand brauchen. Der Rest laeuft trotzdem, und gegen echte
+      # Daten laufen sie im Job "Datenbestand" noch einmal vollstaendig.
       - name: Node-Tests
-        run: node --test tests/opening-hours.test.mjs
+        run: node --test tests/opening-hours.test.mjs tests/local-search.test.mjs
 
   data:
     name: Datenbestand
@@ -52,13 +55,24 @@ jobs:
         with:
           python-version: "3.12"
 
-      # In eine eigene Datei einsammeln: schlaegt der Lauf fehl, bleibt der
-      # mitgelieferte Stand unangetastet und die Seite geht trotzdem online.
-      # Bei einem Commit wird nicht eingesammelt: ein Ingest dauert Minuten und
-      # belastet fremde Server. Frische Daten holt der naechtliche Lauf.
+      # Die Datenbank ist rund 50 MB gross und aendert sich bei jedem Ingest
+      # komplett. Im Repository waere sie am falschen Platz, also liegt sie im
+      # Actions-Cache. Der naechtliche Lauf haelt ihn warm.
+      - name: Datenbank aus dem Cache holen
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: server/data/whopper.sqlite
+          key: whopper-db-${{ github.run_id }}
+          restore-keys: whopper-db-
+
+      # Bei einem Commit wird normalerweise nicht eingesammelt: ein Ingest dauert
+      # eine Viertelstunde und belastet fremde Server, und fuer eine Codeaenderung
+      # verschiebt sich keine Ladesaeule. Liegt aber nichts im Cache, gibt es auch
+      # nichts zu deployen, dann wird eingesammelt.
       - name: Frisch einsammeln
         id: ingest
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' || steps.cache.outputs.cache-matched-key == ''
         continue-on-error: true
         run: python3 server/ingest.py --db fresh.sqlite
 
@@ -66,36 +80,58 @@ jobs:
         if: steps.ingest.outcome == 'success'
         run: mv fresh.sqlite server/data/whopper.sqlite
 
-      - name: Stand aus dem Repository verwenden
-        if: github.event_name == 'push'
-        run: echo "::notice::Commit-Lauf, es bleibt beim Datenstand aus dem Repository."
-
-      - name: Auf den mitgelieferten Stand zurueckfallen
-        if: github.event_name != 'push' && steps.ingest.outcome == 'failure'
-        run: echo "::warning::Overpass war nicht erreichbar, es bleibt beim Stand aus dem Repository."
+      - name: Stand aus dem Cache verwenden
+        if: steps.ingest.outcome != 'success'
+        run: |
+          if [ ! -s server/data/whopper.sqlite ]; then
+            echo "::error::Kein Ingest moeglich und nichts im Cache. Abbruch, statt eine leere Seite zu veroeffentlichen."
+            exit 1
+          fi
+          echo "::warning::Es bleibt beim Stand aus dem Cache."
 
       - name: Statischen Datenbestand schreiben
         run: python3 server/export_static.py
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Jetzt liegt der Datenbestand da, also laufen auch die Tests, die im
+      # Job "Tests" mangels Daten uebersprungen wurden.
+      - name: Suche gegen echte Daten pruefen
+        run: node --test tests/local-search.test.mjs
+
       - name: Bestand pruefen
         run: |
           python3 - <<'PY'
-          import json, sqlite3, sys
+          import json, sys
           data = json.load(open("web/data/spots.json"))
           spots = data["spots"]
           chargers = sum(len(spot["chargers"]) for spot in spots)
-          print(f"{len(spots)} Filialen mit {chargers} Ladesaeulen, Stand {data['meta'].get('ingested_at')}")
-          # Ein leerer oder halber Bestand darf nicht online gehen.
-          if len(spots) < 300 or chargers < 1000:
+          per_kind = {
+              "Ketten": sum(1 for spot in spots if spot["brand"]),
+              "vegan": sum(1 for spot in spots if spot["vegan"]),
+              "rein vegan": sum(1 for spot in spots if spot["veganOnly"]),
+          }
+          print(f"{len(spots)} Lokale mit {chargers} Ladesaeulen, Stand {data['meta'].get('ingested_at')}")
+          print(", ".join(f"{count} {label}" for label, count in per_kind.items()))
+          # Ein leerer oder halber Bestand darf nicht online gehen. Die Schwellen
+          # sind bewusst deutlich unter den gemessenen Zahlen: sie sollen einen
+          # kaputten Lauf abfangen, nicht bei normalen Schwankungen anschlagen.
+          if len(spots) < 1000 or chargers < 1000:
               sys.exit("Datenbestand unplausibel klein, Abbruch")
+          if per_kind["Ketten"] < 300:
+              sys.exit("Zu wenige Kettenfilialen, die Ketten-Abfrage ist vermutlich kaputt")
+          if per_kind["vegan"] <= per_kind["Ketten"]:
+              sys.exit("Keine veganen Lokale ausser den Ketten, die diet:vegan-Abfrage ist kaputt")
           PY
 
+      # Nur der statische Export wandert weiter. Die Datenbank bleibt im Cache,
+      # sie wird zum Deployen nicht gebraucht.
       - uses: actions/upload-artifact@v4
         with:
           name: datenbestand
-          path: |
-            server/data/whopper.sqlite
-            web/data/spots.json
+          path: web/data
           retention-days: 7
 
   pages:
@@ -110,9 +146,18 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Zielverzeichnis ausdruecklich angeben: upload-artifact schneidet den
+      # gemeinsamen Pfadanfang weg, ohne path landeten die Dateien im Wurzel-
+      # verzeichnis und die Seite ginge ohne Datenbestand online.
       - uses: actions/download-artifact@v4
         with:
           name: datenbestand
+          path: web/data
+      - name: Datenbestand kontrollieren
+        run: |
+          ls -l web/data
+          test -s web/data/spots.json
+          test -s web/data/spots-vegan.json
       - uses: actions/configure-pages@v5
       # Auf Pages laeuft kein Server, deshalb geht nur das Verzeichnis web/
       # online. Die Suche rechnet dort der Browser aus data/spots.json.

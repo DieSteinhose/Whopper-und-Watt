@@ -33,8 +33,9 @@ async function pickBackend() {
 
 const state = {
   mode: 'radius',
-  // Burger King ist voreingestellt, Subway waehlt man dazu. Beide sind abwaehlbar.
-  brands: ['bk'],
+  // Burger King ist voreingestellt, alles andere waehlt man dazu. Alles ist
+  // abwaehlbar, auch Burger King.
+  kinds: ['bk'],
   radiusKm: 25,
   corridorM: 3000,
   gapM: 300,
@@ -59,7 +60,7 @@ const view = {
   optionsToggle: document.getElementById('optionsToggle'),
   radiusForm: document.getElementById('radiusForm'),
   routeForm: document.getElementById('routeForm'),
-  brandChips: document.getElementById('brandChips'),
+  kindChips: document.getElementById('kindChips'),
   radiusChips: document.getElementById('radiusChips'),
   corridorChips: document.getElementById('corridorChips'),
   departureLabel: document.getElementById('departureLabel'),
@@ -107,32 +108,70 @@ function setBanner(message) {
   view.banner.hidden = !message;
 }
 
-const BRAND_LABELS = { bk: 'Burger King', subway: 'Subway' };
-const BRAND_GLYPHS = { bk: '🍔', subway: '🥪' };
+const KIND_LABELS = {
+  bk: 'Burger King',
+  subway: 'Subway',
+  vegan: 'Vegane Optionen',
+  vegan_only: 'Rein vegan',
+};
 
-/** "952 Burger King, 787 Subway", oder schlicht die Gesamtzahl. */
+// Obergrenzen fuer die Anzeige. Mit den veganen Kategorien liefert eine Suche
+// ueber 100 km um Berlin gemessen 1934 Treffer. Ungebremst waren das rund 20000
+// Karten in der Liste und, weil Leaflet je Marker ein DOM-Element anlegt,
+// zehntausende Marker auf der Karte: der Kartenreiter liess sich danach nicht
+// mehr oeffnen. Beide Listen sind bereits sortiert, nach Entfernung oder nach
+// Strecke ab Start, "die ersten N" ist hier also die sinnvolle Auswahl.
+const LIST_LIMIT = 200;
+const MAP_LIMIT = 250;
+
+/**
+ * Zeichen fuer die Karte. Die Kette geht vor, denn sie sagt mehr: ein Burger
+ * King zaehlt zwar auch als vegane Option, aber als Burger King erkennt man ihn.
+ */
+function glyphFor(spot) {
+  if (spot.brand === 'bk') return '🍔';
+  if (spot.brand === 'subway') return '🥪';
+  return spot.veganOnly ? '🌱' : '🌿';
+}
+
+function pinKind(spot) {
+  if (spot.brand) return spot.brand;
+  return spot.veganOnly ? 'vegan-only' : 'vegan';
+}
+
+/**
+ * "15189 Lokale, davon 952 Burger King, 788 Subway, 509 rein vegan".
+ *
+ * Die Kategorien ueberschneiden sich, ein Burger King steckt in zweien. Die
+ * Zahl fuer "vegane Optionen" bleibt deshalb weg: sie ist per Konstruktion die
+ * Gesamtzahl, denn im Bestand landet nur, was entweder Kette oder vegan ist.
+ * Nebeneinandergestellt sahe sie aus wie ein Rechenfehler.
+ */
 function describeStock(meta) {
+  const total = `${meta.stores ?? '?'} Lokale`;
   try {
-    const perBrand = JSON.parse(meta.stores_per_brand ?? '{}');
-    const parts = Object.entries(perBrand).map(([key, count]) => `${count} ${BRAND_LABELS[key] ?? key}`);
-    if (parts.length) return parts.join(', ');
+    const perKind = JSON.parse(meta.stores_per_kind ?? '{}');
+    const parts = ['bk', 'subway', 'vegan_only']
+      .filter((key) => perKind[key])
+      .map((key) => `${perKind[key]} ${KIND_LABELS[key]}`);
+    if (parts.length) return `${total}, davon ${parts.join(', ')}`;
   } catch {
     // Ein kaputter Zaehler ist kein Grund, den Tooltip zu verlieren.
   }
-  return `${meta.stores ?? '?'} Filialen`;
+  return total;
 }
 
-function brandLabels() {
-  const chosen = state.brands.map((key) => BRAND_LABELS[key] ?? key);
-  if (chosen.length === 0) return 'Keine Kette';
+function kindLabels() {
+  const chosen = state.kinds.map((key) => KIND_LABELS[key] ?? key);
+  if (chosen.length === 0) return 'Nichts ausgewählt';
   return chosen.join(' und ');
 }
 
-// Ohne ausgewaehlte Kette gibt es nichts zu suchen. Das ist ein erlaubter
-// Zustand, denn beide Ketten sollen abwaehlbar sein, aber er braucht eine Ansage.
-function requireBrand() {
-  if (state.brands.length === 0) {
-    throw new Error('Keine Kette ausgewählt. Burger King oder Subway antippen.');
+// Ohne Auswahl gibt es nichts zu suchen. Das ist ein erlaubter Zustand, denn
+// alle Kategorien sollen abwaehlbar sein, aber er braucht eine Ansage.
+function requireKind() {
+  if (state.kinds.length === 0) {
+    throw new Error('Nichts ausgewählt. Mindestens eine Kategorie antippen.');
   }
 }
 
@@ -146,7 +185,7 @@ function pressed(container, attribute, value) {
 
 function searchParams() {
   return {
-    brands: state.brands,
+    kinds: state.kinds,
     radiusKm: state.radiusKm,
     corridorM: state.corridorM,
     gapM: state.gapM,
@@ -157,7 +196,7 @@ function searchParams() {
 async function searchRadius() {
   const query = view.placeInput.value.trim();
   await withLoading(async () => {
-    requireBrand();
+    requireKind();
     let center;
     if (query) {
       center = await backend.geocode(query);
@@ -179,14 +218,14 @@ async function runRadius(center) {
   state.spots = result.spots;
   state.queryMs = result.queryMs;
   state.rerun = () => withLoading(async () => {
-    requireBrand();
+    requireKind();
     await runRadius(center);
   });
 }
 
 async function searchRoute(waypoints, label) {
   await withLoading(async () => {
-    requireBrand();
+    requireKind();
     const request = {};
     if (waypoints) {
       request.waypoints = waypoints;
@@ -215,7 +254,7 @@ async function runRoute(request) {
   state.spots = result.spots;
   state.queryMs = result.queryMs;
   state.rerun = () => withLoading(async () => {
-    requireBrand();
+    requireKind();
     await runRoute(request);
   });
   if (!result.route.hasMeasuredDurations) {
@@ -276,12 +315,13 @@ function renderStatus() {
     return;
   }
   if (!state.searched) {
-    view.status.textContent = `${brandLabels()} neben der Ladesäule`;
+    view.status.textContent = `${kindLabels()} neben der Ladesäule`;
     return;
   }
   const where = state.route ? state.route.label : (state.center?.label ?? '');
   const speed = state.queryMs != null ? ` · ${state.queryMs} ms` : '';
-  view.status.textContent = `${state.spots.length} Kombis · ${where}${speed}`;
+  const capped = state.spots.length > LIST_LIMIT ? ` (${LIST_LIMIT} gezeigt)` : '';
+  view.status.textContent = `${state.spots.length} Kombis${capped} · ${where}${speed}`;
 }
 
 function renderList() {
@@ -301,7 +341,13 @@ function renderList() {
   }
 
   const now = new Date();
-  view.list.innerHTML = state.spots.map((spot) => card(spot, now)).join('');
+  const shown = state.spots.slice(0, LIST_LIMIT);
+  const rest = state.spots.length - shown.length;
+  view.list.innerHTML = shown.map((spot) => card(spot, now)).join('') + (rest > 0
+    ? `<div class="empty"><strong>${rest} weitere Treffer</strong>` +
+      'Die Liste ist auf die nächstgelegenen begrenzt. Umkreis verkleinern, ' +
+      'Abstand verringern oder eine Kategorie abwählen.</div>'
+    : '');
 }
 
 function card(spot, now) {
@@ -313,6 +359,11 @@ function card(spot, now) {
   if (spot.routeProgressM != null) badges.push(`km ${Math.round(spot.routeProgressM / 1000)} ab Start`);
   else if (spot.distanceM != null) badges.push(`${formatMeters(spot.distanceM)} entfernt`);
   if (spot.routeOffsetM != null) badges.push(`${formatMeters(spot.routeOffsetM)} neben der Route`);
+  // Bei den Ketten waere das Abzeichen an jeder Karte und damit wertlos: dort
+  // gilt vegan pauschal, weil die Kette das Produkt fuehrt. Nur wo es aus dem
+  // OSM-Tag des einzelnen Lokals kommt, sagt es etwas aus.
+  if (spot.veganOnly) badges.push('rein vegan');
+  else if (spot.vegan && !spot.brand) badges.push('vegane Optionen');
 
   const details = [];
   if (charger?.powerKw) details.push(`bis ${trimNumber(charger.powerKw)} kW`);
@@ -336,7 +387,7 @@ function card(spot, now) {
         ${details.length ? `<p class="details">${escapeHtml(details.join(' · '))}</p>` : ''}
       </div>
       <div class="actions">
-        <a href="geo:${spot.lat},${spot.lon}?q=${spot.lat},${spot.lon}(${encodeURIComponent(spot.name)})">Zur Filiale</a>
+        <a href="geo:${spot.lat},${spot.lon}?q=${spot.lat},${spot.lon}(${encodeURIComponent(spot.name)})">Zum Lokal</a>
         ${charger ? `<a href="geo:${charger.lat},${charger.lon}?q=${charger.lat},${charger.lon}(Ladesäule)">Zur Säule</a>` : ''}
         <a href="${osmLink(spot)}" target="_blank" rel="noreferrer">OSM</a>
       </div>
@@ -399,7 +450,11 @@ function renderMap() {
   }
 
   const now = new Date();
-  state.spots.forEach((spot) => {
+  // Nur die nächstgelegene Säule je Lokal, und nur die ersten MAP_LIMIT Lokale.
+  // Alle Säulen zu zeichnen hiess bei dichter Ladeinfrastruktur rund fünfzehn
+  // Marker pro Lokal; die Karte stand dann. Wie viele Standorte in Reichweite
+  // liegen, steht ohnehin auf der Karte in der Liste.
+  state.spots.slice(0, MAP_LIMIT).forEach((spot) => {
     const open = evaluateOpeningHours(spot.openingHours, arrivalOf(spot));
     const closed = open.state === 'closed';
     const charger = spot.chargers[0];
@@ -409,17 +464,19 @@ function renderMap() {
         weight: 4,
         opacity: closed ? 0.4 : 0.9,
       }).addTo(layer);
-    }
-    // Erst die Saeulen, dann die Filiale: bei kleinem Zoom liegen die Marker
-    // uebereinander, und oben liegen soll die Filiale.
-    spot.chargers.forEach((item) => {
-      L.marker([item.lat, item.lon], { icon: pin('charger', '⚡') })
-        .bindPopup(`<strong>${escapeHtml(item.operator || 'Ladesäule')}</strong><br>${formatMeters(item.gapM)} zum Burger King`)
+      // Erst die Saeule, dann das Lokal: bei kleinem Zoom liegen die Marker
+      // uebereinander, und oben liegen soll das Lokal.
+      L.marker([charger.lat, charger.lon], { icon: pin('charger', '⚡') })
+        .bindPopup(
+          `<strong>${escapeHtml(charger.operator || 'Ladesäule')}</strong>` +
+          `<br>${formatMeters(charger.gapM)} zu ${escapeHtml(spot.name)}` +
+          (spot.chargers.length > 1 ? `<br>${spot.chargers.length} Standorte in Reichweite` : ''),
+        )
         .addTo(layer);
-      bounds.push([item.lat, item.lon]);
-    });
+      bounds.push([charger.lat, charger.lon]);
+    }
     L.marker([spot.lat, spot.lon], {
-      icon: pin(closed ? 'store-closed' : `store ${spot.brand ?? 'bk'}`, BRAND_GLYPHS[spot.brand] ?? '🍔'),
+      icon: pin(closed ? 'store-closed' : `store ${pinKind(spot)}`, glyphFor(spot)),
       zIndexOffset: 1000,
     })
       .bindPopup(
@@ -500,13 +557,13 @@ document.getElementById('gapChips').addEventListener('click', (event) => {
   }
 });
 
-view.brandChips.addEventListener('click', (event) => {
-  const key = event.target.dataset?.brand;
+view.kindChips.addEventListener('click', (event) => {
+  const key = event.target.dataset?.kind;
   if (!key) return;
-  state.brands = state.brands.includes(key)
-    ? state.brands.filter((item) => item !== key)
-    : [...state.brands, key];
-  event.target.setAttribute('aria-pressed', String(state.brands.includes(key)));
+  state.kinds = state.kinds.includes(key)
+    ? state.kinds.filter((item) => item !== key)
+    : [...state.kinds, key];
+  event.target.setAttribute('aria-pressed', String(state.kinds.includes(key)));
   rerunIfSearched();
 });
 

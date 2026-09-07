@@ -31,7 +31,7 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import SpotDatabase  # noqa: E402
-from geo import BRANDS, DEFAULT_BRANDS, parse_brands  # noqa: E402
+from geo import DEFAULT_KINDS, KINDS, parse_kinds  # noqa: E402
 import plan  # noqa: E402
 import routing  # noqa: E402
 
@@ -170,11 +170,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _meta(self) -> dict:
         meta = dict(self.database.meta())
-        # Welche Ketten die App anbieten darf, entscheidet der Datenbestand.
-        meta["availableBrands"] = [
-            {"key": brand.key, "label": brand.label} for brand in BRANDS.values()
-        ]
-        meta["defaultBrands"] = list(DEFAULT_BRANDS)
+        # Welche Kategorien die App anbieten darf, entscheidet der Datenbestand.
+        meta["availableKinds"] = [{"key": kind.key, "label": kind.label} for kind in KINDS.values()]
+        meta["defaultKinds"] = list(DEFAULT_KINDS)
         meta["ok"] = True
         return meta
 
@@ -184,16 +182,15 @@ class Handler(BaseHTTPRequestHandler):
         radius_m = min(_number(query, "radius_km", default=25) * 1000, MAX_RADIUS_M)
         gap_m = min(_number(query, "gap_m", default=300), MAX_GAP_M)
         only_enbw = _flag(query, "only_enbw", default=True)
-        brands = parse_brands((query.get("brands") or [None])[0])
+        kinds = parse_kinds((query.get("kinds") or [None])[0])
 
-        spots = self.database.spots_near(
-            lat, lon, radius_m, gap_m, only_enbw, [brand.key for brand in brands]
-        )
+        keys = [kind.key for kind in kinds]
+        spots = self.database.spots_near(lat, lon, radius_m, gap_m, only_enbw, keys)
         return {
             "mode": "radius",
             "center": {"lat": lat, "lon": lon},
             "radiusM": radius_m,
-            "brands": [brand.key for brand in brands],
+            "kinds": keys,
             "spots": spots,
             "queryMs": round((time.time() - started) * 1000, 1),
         }
@@ -211,7 +208,7 @@ class Handler(BaseHTTPRequestHandler):
         corridor_m = min(float(body.get("corridorM", 3000)), MAX_CORRIDOR_M)
         gap_m = min(float(body.get("gapM", 300)), MAX_GAP_M)
         only_enbw = bool(body.get("onlyEnbw", True))
-        brands = parse_brands(",".join(body.get("brands") or []))
+        kinds = parse_kinds(",".join(body.get("kinds") or []))
 
         waypoints, label = self._waypoints(body)
         computed = routing.route(waypoints)
@@ -221,10 +218,11 @@ class Handler(BaseHTTPRequestHandler):
             corridor_m=corridor_m,
             gap_m=gap_m,
             only_enbw=only_enbw,
-            brands=[brand.key for brand in brands],
+            kinds=[kind.key for kind in kinds],
         )
         return {
             "mode": "route",
+            "kinds": [kind.key for kind in kinds],
             "route": {
                 "polyline": computed["polyline"],
                 "distanceM": computed["distanceM"],
@@ -387,7 +385,7 @@ def main() -> int:
     server = ThreadingHTTPServer((arguments.host, arguments.port), Handler)
 
     print(
-        f"Whopper & Watt: {meta.get('burgers', '?')} Filialen, "
+        f"Whopper & Watt: {meta.get('stores', '?')} Lokale, "
         f"{meta.get('chargers', '?')} Saeulen, Stand {meta.get('ingested_at', '?')}",
         flush=True,
     )
