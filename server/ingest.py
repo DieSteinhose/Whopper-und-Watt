@@ -12,9 +12,14 @@ Zwei Schritte:
 Schritt 2 lief frueher in kleinen Boxen um jede einzelne Filiale. Das war richtig,
 solange es um knapp zweitausend Filialen ging. Mit den veganen Lokalen sind es
 ueber fuenfzehntausend, und daraus waeren rund achthundert Abfragen geworden. Ein
-Raster ueber Deutschland sind dagegen etwa sechzig, unabhaengig davon, wie viele
-Lokale dazukommen. Gemessen: 58335 Ladesaeulen liegen in der Bounding-Box,
-von denen 25456 in Reichweite eines Lokals liegen und gespeichert bleiben.
+Raster ueber Deutschland sind dagegen 63, unabhaengig davon, wie viele Lokale
+dazukommen. Gemessen: 58335 Ladesaeulen liegen in der Bounding-Box, von denen
+25456 in Reichweite eines Lokals liegen und gespeichert bleiben.
+
+Abgefragt werden zwei Sachen gleichzeitig, siehe run_queries: ein grosser Teil der
+Zeit ist Warteschlange, nicht Rechnen. Zusammen mit der einen statt drei Abfragen
+fuer diet:vegan bringt das den Lauf von 924 auf 395 Sekunden, bei identischem
+Ergebnis.
 
 Die oeffentlichen Instanzen weisen Abfragen zwischendurch ab, deshalb ist der Lauf
 fortsetzbar: jede erledigte Rasterzelle wird sofort festgeschrieben, ein Neustart
@@ -33,6 +38,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -44,6 +50,7 @@ from geo import (  # noqa: E402
     FOOD_AMENITIES,
     Brand,
     address_of,
+    chunked,
     has_vegan_options,
     haversine_m,
     is_enbw,
@@ -70,6 +77,11 @@ CHARGER_SEARCH_M = 1000
 # ueber Nord- und Ostsee wegfallen. Pro Zelle rund tausend Saeulen, das beantwortet
 # jede Instanz ohne Zeitueberschreitung.
 CHARGER_GRID = 8
+
+# Gleichzeitige Overpass-Abfragen. Zwei ist das, was die oeffentlichen Instanzen
+# je IP zugestehen; gemessen bringt das gegenueber einer nach der anderen fast
+# den doppelten Durchsatz. Wer eine eigene Instanz hat, dreht --workers hoch.
+OVERPASS_WORKERS = 2
 
 # Deutschland mit etwas Rand. Bewusst grosszuegig: eine Filiale kurz hinter der
 # Grenze ist fuer die Frage genauso brauchbar wie eine kurz davor.
@@ -160,7 +172,7 @@ def migrate(connection: sqlite3.Connection) -> list[str]:
     return added
 
 
-def overpass(query: str, timeout: int = 300, attempts: int = 4) -> dict:
+def overpass(query: str, timeout: int = 600, attempts: int = 4) -> dict:
     """Fragt Overpass ab und wechselt bei Fehlern den Endpunkt."""
     last_error: Exception | None = None
     for attempt in range(attempts):
@@ -224,20 +236,44 @@ def chain_query(prelude: str, selector: str, brands: Sequence[Brand]) -> str:
 out center tags;"""
 
 
-def vegan_query(prelude: str, selector: str, amenity: str) -> str:
+def vegan_query(prelude: str, selector: str) -> str:
     """Alles mit einem diet:vegan-Tag, gefiltert wird danach in Python.
 
-    Auf das Vorhandensein des Tags zu filtern statt auf seine Werte ist die
-    guenstigere Abfrage: diet:vegan haengt in der deutschen Gastronomie an
-    20010 Objekten, amenity=restaurant allein an 138261. Die Instanz greift
-    damit auf den kleinen Index zu. Die 6290 Lokale mit diet:vegan=no kommen
-    dabei unnoetig mit, das ist billiger als eine Wertabfrage mit Alternativen.
+    Zwei Entscheidungen stecken hier drin, beide gemessen:
+
+    Erstens wird auf das *Vorhandensein* des Tags gefiltert, nicht auf seine
+    Werte. diet:vegan haengt in der deutschen Gastronomie an 20010 Objekten,
+    amenity=restaurant allein an 138261. Die Instanz greift damit auf den
+    kleinen Index zu.
+
+    Zweitens ist die Art des Lokals gar nicht mehr Teil der Abfrage. Vorher
+    lief je eine Abfrage fuer restaurant, fast_food und cafe, zusammen 383
+    Sekunden. Eine einzige Abfrage nur ueber den Tag-Index liefert 21946
+    Objekte in 154 Sekunden, und die paar Automaten und Laeden darin wirft
+    load_stores ueber FOOD_AMENITIES weg.
     """
     return (
-        f"[out:json][timeout:300];\n{prelude}\n"
-        f'nwr["amenity"="{amenity}"]["diet:vegan"]{selector};\n'
+        f"[out:json][timeout:600];\n{prelude}\n"
+        f'nwr["diet:vegan"]{selector};\n'
         "out center tags;"
     )
+
+
+def run_queries(queries: Sequence[str], workers: int) -> list[dict]:
+    """Fuehrt mehrere Overpass-Abfragen gleichzeitig aus, Reihenfolge bleibt.
+
+    Gemessen an disjunkten Rasterzellen auf overpass.openstreetmap.fr: eine
+    Abfrage nach der anderen 175 Objekte/s, zwei gleichzeitig 331, drei 521.
+    Ein grosser Teil der Zeit ist Warteschlange, nicht Rechnen.
+
+    Bei zwei bleibt es trotzdem, denn das ist es, was die oeffentlichen
+    Instanzen je IP zugestehen. Wer eine eigene Instanz betreibt, dreht
+    --workers hoch.
+    """
+    if workers <= 1 or len(queries) == 1:
+        return [overpass(query) for query in queries]
+    with ThreadPoolExecutor(max_workers=min(workers, len(queries))) as pool:
+        return list(pool.map(overpass, queries))
 
 
 def _fetch_stores(
@@ -245,6 +281,7 @@ def _fetch_stores(
     country: str | None,
     seed: Path | None,
     brands: Sequence[Brand],
+    workers: int = OVERPASS_WORKERS,
 ) -> list[dict]:
     """Holt die Rohdaten, standardmaessig ueber eine Bounding-Box.
 
@@ -257,8 +294,8 @@ def _fetch_stores(
 
     Ketten und vegane Lokale werden getrennt abgefragt. Zusammengefasst waere es
     eine einzige, sehr grosse Antwort, und genau die hat mir eine Instanz schon
-    mitten im Senden abgebrochen. Vier kleinere Abfragen darf der Endpunktwechsel
-    einzeln wiederholen.
+    mitten im Senden abgebrochen. Zwei kleinere Abfragen darf der Endpunktwechsel
+    einzeln wiederholen, und nebenbei laufen sie gleichzeitig.
     """
     if seed and seed.exists():
         print(f"Lokale aus {seed}", flush=True)
@@ -266,37 +303,35 @@ def _fetch_stores(
 
     selector = f"({bbox})"
     prelude = ""
+    elements: list[dict] = []
     if country:
+        area = f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;'
         print(f"Ketten in {country} abfragen (braucht eine Instanz mit Area-Daten)", flush=True)
         try:
             # Nur ein Durchgang durch die Endpunkte: fehlende Area-Daten sind kein
             # Ausfall, den Warten heilt, sondern ein Grund fuer die Bounding-Box.
             elements = list(
-                overpass(
-                    chain_query(
-                        f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;',
-                        "(area.searched)",
-                        brands,
-                    ),
-                    attempts=1,
-                ).get("elements", [])
+                overpass(chain_query(area, "(area.searched)", brands), attempts=1).get("elements", [])
             )
-            prelude = f'area["ISO3166-1"="{country}"][admin_level=2]->.searched;'
-            selector = "(area.searched)"
+            prelude, selector = area, "(area.searched)"
         except RuntimeError as error:
             print(f"  Flaechensuche gescheitert ({error}), weiche auf die Bounding-Box aus", flush=True)
-            elements = list(overpass(chain_query("", f"({bbox})", brands)).get("elements", []))
-    else:
-        print(
-            f"Ketten im Bereich {bbox} abfragen"
-            f" ({', '.join(brand.label for brand in brands)})",
-            flush=True,
-        )
-        elements = list(overpass(chain_query("", selector, brands)).get("elements", []))
+            elements = list(overpass(chain_query("", selector, brands)).get("elements", []))
+        # Nacheinander, nicht gleichzeitig: ob die Flaechensuche geht, entscheidet
+        # sich erst an der ersten Abfrage, und danach richtet sich diese hier.
+        print("Lokale mit diet:vegan abfragen", flush=True)
+        elements.extend(overpass(vegan_query(prelude, selector)).get("elements", []))
+        return elements
 
-    for amenity in sorted(FOOD_AMENITIES):
-        print(f"Lokale mit diet:vegan abfragen ({amenity})", flush=True)
-        elements.extend(overpass(vegan_query(prelude, selector, amenity)).get("elements", []))
+    print(
+        f"Ketten und vegane Lokale im Bereich {bbox} abfragen"
+        f" ({', '.join(brand.label for brand in brands)}, zwei Abfragen gleichzeitig)",
+        flush=True,
+    )
+    for payload in run_queries(
+        [chain_query("", selector, brands), vegan_query("", selector)], workers
+    ):
+        elements.extend(payload.get("elements", []))
     return elements
 
 
@@ -306,6 +341,7 @@ def load_stores(
     country: str | None,
     seed: Path | None,
     brands: Sequence[Brand],
+    workers: int = OVERPASS_WORKERS,
 ) -> int:
     """Schreibt Lokale in die Datenbank, mit den Merkmalen fuer die Auswahl.
 
@@ -317,7 +353,7 @@ def load_stores(
     Menueumstellung steht. 54 Filialen tragen diet:vegan=no. Dem Tag hier zu
     folgen hiesse, Treffer wegen veralteter Kartendaten zu verstecken.
     """
-    elements = _fetch_stores(bbox, country, seed, brands)
+    elements = _fetch_stores(bbox, country, seed, brands, workers)
 
     rows: dict[str, tuple] = {}
     labels: dict[str, str] = {}
@@ -412,7 +448,31 @@ def cells_with_stores(
     return wanted
 
 
-def load_chargers(connection: sqlite3.Connection, bbox: str, grid: int, resume: bool) -> int:
+def charger_query(cell: tuple[float, float, float, float]) -> str:
+    """Alle Ladesaeulen in einer Rasterzelle, mit Rand.
+
+    Der Rand sorgt dafuer, dass eine Saeule knapp jenseits der Zellgrenze zu
+    einem Lokal knapp diesseits gefunden wird. Die Ueberlappung liefert Saeulen
+    doppelt, das faengt INSERT OR REPLACE ab.
+    """
+    south, west, north, east = cell
+    pad_lat = lat_degrees_for_meters(CHARGER_SEARCH_M)
+    pad_lon = lon_degrees_for_meters(CHARGER_SEARCH_M, (south + north) / 2)
+    return (
+        "[out:json][timeout:600];\n"
+        f'nwr["amenity"="charging_station"]({south - pad_lat:.5f},{west - pad_lon:.5f},'
+        f"{north + pad_lat:.5f},{east + pad_lon:.5f});\n"
+        "out center tags;"
+    )
+
+
+def load_chargers(
+    connection: sqlite3.Connection,
+    bbox: str,
+    grid: int,
+    resume: bool,
+    workers: int = OVERPASS_WORKERS,
+) -> int:
     stores = connection.execute("SELECT id, lat, lon FROM store").fetchall()
     cells = grid_cells(bbox, grid)
     wanted = cells_with_stores(cells, stores, CHARGER_SEARCH_M)
@@ -426,64 +486,61 @@ def load_chargers(connection: sqlite3.Connection, bbox: str, grid: int, resume: 
         connection.execute("DELETE FROM ingest_cell")
         connection.commit()
 
+    todo = [index for index in wanted if f"{grid}:{index}" not in done]
     print(
         f"Ladesaeulen im Raster {grid}x{grid}: {len(wanted)} von {len(cells)} Zellen"
-        f" enthalten eines der {len(stores)} Lokale",
+        f" enthalten eines der {len(stores)} Lokale, {len(todo)} noch offen",
         flush=True,
     )
-    # Der Rand sorgt dafuer, dass eine Saeule knapp jenseits der Zellgrenze zu
-    # einem Lokal knapp diesseits gefunden wird. Die Ueberlappung liefert
-    # Saeulen doppelt, das faengt INSERT OR REPLACE ab.
-    pad_lat = lat_degrees_for_meters(CHARGER_SEARCH_M)
-    for position, index in enumerate(wanted, start=1):
-        key = f"{grid}:{index}"
-        if key in done:
-            continue
-        south, west, north, east = cells[index]
-        pad_lon = lon_degrees_for_meters(CHARGER_SEARCH_M, (south + north) / 2)
-        query = (
-            "[out:json][timeout:300];\n"
-            f'nwr["amenity"="charging_station"]({south - pad_lat:.5f},{west - pad_lon:.5f},'
-            f"{north + pad_lat:.5f},{east + pad_lon:.5f});\n"
-            "out center tags;"
-        )
-        print(f"  Zelle {position}/{len(wanted)}", flush=True)
-        payload = overpass(query)
 
-        rows = []
-        for element in payload.get("elements", []):
-            point = element_point(element)
-            tags = element.get("tags") or {}
-            if not point:
-                continue
-            rows.append(
-                (
-                    f"{element.get('type', 'node')}/{element.get('id')}",
-                    point[0],
-                    point[1],
-                    tags.get("operator") or tags.get("network") or tags.get("name"),
-                    1 if is_enbw(tags) else 0,
-                    max_power_kw(tags),
-                    tags.get("capacity"),
-                    tags.get("fee"),
-                    json.dumps(tags, ensure_ascii=False),
-                )
+    # Geholt wird gleichzeitig, geschrieben nur hier im Hauptfaden: die
+    # SQLite-Verbindung gehoert einem Faden, und jede fertige Zelle soll sofort
+    # festgeschrieben sein, damit ein Abbruch nichts kostet.
+    for position, batch in enumerate(chunked(todo, max(1, workers))):
+        first = position * max(1, workers) + 1
+        print(f"  Zellen {first}-{min(first + len(batch) - 1, len(todo))}/{len(todo)}", flush=True)
+        payloads = run_queries([charger_query(cells[index]) for index in batch], workers)
+        for index, payload in zip(batch, payloads):
+            store_chargers(connection, payload)
+            connection.execute(
+                "INSERT OR REPLACE INTO ingest_cell (cell, done_at) VALUES (?, ?)",
+                (f"{grid}:{index}", datetime.now(timezone.utc).isoformat(timespec="seconds")),
             )
-        connection.executemany(
-            "INSERT OR REPLACE INTO charger"
-            " (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        connection.execute(
-            "INSERT OR REPLACE INTO ingest_cell (cell, done_at) VALUES (?, ?)",
-            (key, datetime.now(timezone.utc).isoformat(timespec="seconds")),
-        )
-        connection.commit()
+            connection.commit()
 
     total = connection.execute("SELECT COUNT(*) AS n FROM charger").fetchone()["n"]
     print(f"  {total} Ladesaeulen gespeichert", flush=True)
     return total
+
+
+def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
+    """Schreibt die Ladesaeulen einer Overpass-Antwort weg."""
+    rows = []
+    for element in payload.get("elements", []):
+        point = element_point(element)
+        tags = element.get("tags") or {}
+        if not point:
+            continue
+        rows.append(
+            (
+                f"{element.get('type', 'node')}/{element.get('id')}",
+                point[0],
+                point[1],
+                tags.get("operator") or tags.get("network") or tags.get("name"),
+                1 if is_enbw(tags) else 0,
+                max_power_kw(tags),
+                tags.get("capacity"),
+                tags.get("fee"),
+                json.dumps(tags, ensure_ascii=False),
+            )
+        )
+    connection.executemany(
+        "INSERT OR REPLACE INTO charger"
+        " (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    return len(rows)
 
 
 def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
@@ -584,6 +641,13 @@ def main() -> int:
         help="Zellen je Achse fuer den Ladesaeulen-Schritt. Groesser heisst mehr,"
         " dafuer kleinere Abfragen.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=OVERPASS_WORKERS,
+        help="Gleichzeitige Overpass-Abfragen. Zwei ist das, was oeffentliche Instanzen"
+        " je IP zugestehen; mehr nur gegen eine eigene Instanz.",
+    )
     parser.add_argument("--no-resume", action="store_true", help="Ladesaeulen komplett neu holen")
     parser.add_argument("--pairs-only", action="store_true", help="Nur Paare und Index neu bauen")
     parser.add_argument(
@@ -599,17 +663,27 @@ def main() -> int:
         parser.error(f"Keine bekannte Kette in --brands. Moeglich: {', '.join(BRANDS)}")
     if arguments.charger_grid < 1:
         parser.error("--charger-grid braucht mindestens 1")
+    if arguments.workers < 1:
+        parser.error("--workers braucht mindestens 1")
 
     connection = connect(Path(arguments.db))
     started = time.time()
 
     if not arguments.pairs_only:
-        load_stores(connection, arguments.bbox, arguments.country, arguments.stores_json, brands)
+        load_stores(
+            connection,
+            arguments.bbox,
+            arguments.country,
+            arguments.stores_json,
+            brands,
+            arguments.workers,
+        )
         load_chargers(
             connection,
             arguments.bbox,
             arguments.charger_grid,
             resume=not arguments.no_resume,
+            workers=arguments.workers,
         )
 
     print("Paare berechnen", flush=True)

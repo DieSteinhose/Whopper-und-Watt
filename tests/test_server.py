@@ -245,8 +245,30 @@ class DatabaseTest(unittest.TestCase):
             counterpart = exported[spot["id"]]
             # Was erst die Abfrage ausrechnet, steht naturgemaess nicht im Export.
             per_query = {"distanceM", "routeOffsetM", "routeProgressM", "routeSeconds"}
-            self.assertEqual(set(spot) - per_query, set(counterpart), spot["id"])
+            # Umgekehrt darf der Export Felder mitgeben, die es nur ohne Server
+            # gibt. Gefaehrlich ist nur die andere Richtung, an der ist der
+            # OSM-Knopf gescheitert: ein Feld, das nur der Server liefert.
+            export_only = {"chargersCapped"}
+            self.assertEqual(set(spot) - per_query, set(counterpart) - export_only, spot["id"])
             self.assertEqual(set(spot["chargers"][0]), set(counterpart["chargers"][0]))
+
+    def test_charger_cap_keeps_the_nearest_of_each_class(self):
+        """Der Export kuerzt je Klasse, damit der EnBW-Filter exakt bleibt."""
+        import export_static
+
+        chargers = [
+            {"id": f"node/{index}", "isEnbw": index == 9, "gapM": index * 10}
+            for index in range(10)
+        ]
+        kept, capped = export_static.cap_chargers(chargers, per_class=3)
+        self.assertTrue(capped)
+        # Drei naechste fremde plus die eine EnBW-Saeule, die am weitesten weg ist.
+        self.assertEqual([item["id"] for item in kept], ["node/0", "node/1", "node/2", "node/9"])
+
+        # Ohne Kuerzung bleibt alles, und dann ist nichts weggefallen.
+        kept, capped = export_static.cap_chargers(chargers[:2], per_class=3)
+        self.assertEqual(len(kept), 2)
+        self.assertFalse(capped)
 
     def test_labels_and_flags_travel_with_the_spot(self):
         def one(kinds):
@@ -454,21 +476,52 @@ class IngestTest(unittest.TestCase):
             ingest.overpass = original
 
         self.assertEqual(count, 1)
-        # Erst die Flaechensuche, dann dieselbe Frage per Bounding-Box, danach
-        # je eine Abfrage fuer die drei Gastro-Arten mit diet:vegan.
-        self.assertEqual(len(queries), 2 + len(geo.FOOD_AMENITIES))
+        # Erst die Flaechensuche, dann dieselbe Frage per Bounding-Box, dann die
+        # eine Abfrage fuer alles mit einem diet:vegan-Tag.
+        self.assertEqual(len(queries), 3)
         self.assertIn("area.searched", queries[0])
-        self.assertIn("47.2,5.8,55.1,15.1", queries[1])
         # Nach dem Ausweichen darf keine einzige Abfrage mehr auf die Flaeche
         # zeigen, sonst laufen die veganen Lokale in denselben Fehler.
         for query in queries[1:]:
             self.assertNotIn("area.searched", query)
             self.assertIn("47.2,5.8,55.1,15.1", query)
+        self.assertIn('"diet:vegan"', queries[2])
+
+    def test_vegan_query_uses_only_the_tag_index(self):
+        """Eine Abfrage ueber den seltenen Tag, nicht drei ueber die Lokalarten.
+
+        Gemessen: drei Abfragen mit amenity-Filter zusammen 383 Sekunden, diese
+        eine 154. Die Lokalart filtert danach load_stores ueber FOOD_AMENITIES.
+        """
+        query = ingest.vegan_query("", "(47.2,5.8,55.1,15.1)")
+        self.assertIn('nwr["diet:vegan"](47.2,5.8,55.1,15.1)', query)
         for amenity in geo.FOOD_AMENITIES:
-            self.assertTrue(
-                any(f'"amenity"="{amenity}"' in query and '"diet:vegan"' in query for query in queries),
-                amenity,
+            self.assertNotIn(f'"amenity"="{amenity}"', query)
+
+    def test_non_food_with_a_vegan_tag_is_dropped(self):
+        """Ein Verkaufsautomat mit diet:vegan ist kein Lokal."""
+        with tempfile.TemporaryDirectory() as directory:
+            payload = {
+                "elements": [
+                    {"type": "node", "id": 1, "lat": 48.0, "lon": 9.0,
+                     "tags": {"amenity": "restaurant", "diet:vegan": "only", "name": "Grünzeug"}},
+                    {"type": "node", "id": 2, "lat": 48.1, "lon": 9.1,
+                     "tags": {"amenity": "vending_machine", "diet:vegan": "only"}},
+                    {"type": "node", "id": 3, "lat": 48.2, "lon": 9.2,
+                     "tags": {"shop": "supermarket", "diet:vegan": "only", "name": "Veganladen"}},
+                ]
+            }
+            seed = Path(directory) / "seed.json"
+            seed.write_text(json.dumps(payload))
+            connection = ingest.connect(Path(directory) / "food.sqlite")
+            count = ingest.load_stores(
+                connection, ingest.GERMANY_BBOX, None, seed, [geo.BRANDS["bk"]]
             )
+            self.assertEqual(count, 1)
+            row = connection.execute("SELECT id, amenity, vegan_only FROM store").fetchone()
+            self.assertEqual(row["id"], "node/1")
+            self.assertEqual(row["amenity"], "restaurant")
+            self.assertEqual(row["vegan_only"], 1)
 
     def test_burger_rows_survive_a_second_ingest(self):
         with tempfile.TemporaryDirectory() as directory:

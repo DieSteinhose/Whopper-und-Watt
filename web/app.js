@@ -369,7 +369,14 @@ function card(spot, now) {
   if (charger?.powerKw) details.push(`bis ${trimNumber(charger.powerKw)} kW`);
   if (charger?.capacity) details.push(`${charger.capacity} Ladepunkte`);
   if (charger?.fee) details.push(charger.fee === 'no' ? 'kostenlos' : 'kostenpflichtig');
-  if (spot.chargers.length > 1) details.push(`${spot.chargers.length} Standorte in Reichweite`);
+  // Ohne Server ist die Saeulenliste je Lokal auf die naechsten drei je Klasse
+  // gekuerzt, sonst waere die Datei 5,2 statt 1,6 MB. Welche die naechste ist
+  // und ob es ueberhaupt eine gibt, bleibt exakt; nur die Anzahl ist dann eine
+  // Untergrenze, und das schreibt das Pluszeichen hin.
+  if (spot.chargers.length > 1) {
+    const more = spot.chargersCapped ? '+' : '';
+    details.push(`${spot.chargers.length}${more} Standorte in Reichweite`);
+  }
 
   const label = spot.routeSeconds != null
     ? `Ankunft ca. ${formatMoment(arrival, now)}`
@@ -470,7 +477,9 @@ function renderMap() {
         .bindPopup(
           `<strong>${escapeHtml(charger.operator || 'Ladesäule')}</strong>` +
           `<br>${formatMeters(charger.gapM)} zu ${escapeHtml(spot.name)}` +
-          (spot.chargers.length > 1 ? `<br>${spot.chargers.length} Standorte in Reichweite` : ''),
+          (spot.chargers.length > 1
+            ? `<br>${spot.chargers.length}${spot.chargersCapped ? '+' : ''} Standorte in Reichweite`
+            : ''),
         )
         .addTo(layer);
       bounds.push([charger.lat, charger.lon]);

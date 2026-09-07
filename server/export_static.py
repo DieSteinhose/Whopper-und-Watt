@@ -36,6 +36,26 @@ from db import spot_payload  # noqa: E402
 # Der Zusatzteil heisst wie die Hauptdatei, nur mit diesem Anhaengsel.
 VEGAN_SUFFIX = "-vegan"
 
+# Je Lokal hoechstens so viele Saeulen je Klasse (EnBW und fremd) mitgeben.
+#
+# In der Stadt liegen bei 1000 m im Schnitt 17 Saeulen an einem Lokal, und
+# diese Listen sind der Loewenanteil der Datei: ungekuerzt 5,21 MB gepackt,
+# mit drei je Klasse 1,59 MB. Ohne Verlust an Aussagekraft, denn die App
+# braucht je Filterstellung nur zwei Dinge, und beide bleiben exakt:
+#
+#   "gibt es hier ueberhaupt eine passende Saeule bis X Meter?"
+#   "welche ist die naechste und was steht an ihr?"
+#
+# Die naechste EnBW-Saeule ist die naechste bei jedem Abstand, der sie
+# einschliesst, und bei kleinerem Abstand gibt es gar keine. Genau deshalb
+# wird je Klasse gekuerzt und nicht ueber beide zusammen: sonst koennte der
+# EnBW-Filter eine Filiale verlieren, an der zwar eine EnBW-Saeule liegt,
+# aber vier fremde naeher dran sind.
+#
+# Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist
+# chargersCapped mit, und die App schreibt dann "N+".
+CHARGERS_PER_CLASS = 3
+
 
 def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     chargers: dict[str, list[dict]] = {}
@@ -62,6 +82,24 @@ def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     return chargers
 
 
+def cap_chargers(chargers: list[dict], per_class: int = CHARGERS_PER_CLASS) -> tuple[list[dict], bool]:
+    """Je Klasse die naechsten [per_class] behalten, aufsteigend nach Abstand.
+
+    Erwartet die Liste bereits nach gapM sortiert, so wie sie aus der Datenbank
+    kommt. Zweiter Rueckgabewert sagt, ob etwas weggefallen ist.
+    """
+    if per_class <= 0:
+        return chargers, False
+    kept: list[dict] = []
+    seen = {True: 0, False: 0}
+    for charger in chargers:
+        klass = bool(charger["isEnbw"])
+        if seen[klass] < per_class:
+            seen[klass] += 1
+            kept.append(charger)
+    return kept, len(kept) < len(chargers)
+
+
 def _write(path: Path, payload: dict) -> tuple[int, int]:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -83,9 +121,12 @@ def export(db_path: Path, out_path: Path) -> dict:
         # Derselbe Bauplan wie im Server. Ein Feld, das nur eine der beiden
         # Betriebsarten mitliefert, faellt sonst genau dort auf die Nase, wo
         # niemand hinschaut. Hier war schon einmal ein Link nach undefined.
-        spot = spot_payload(row, near)
+        kept, capped = cap_chargers(near)
+        spot = spot_payload(row, kept)
         spot["lat"] = round(spot["lat"], 6)
         spot["lon"] = round(spot["lon"], 6)
+        if capped:
+            spot["chargersCapped"] = True
         # Die Ketten kommen in den Grundteil, alles andere in den Zusatzteil.
         # Ein Lokal steckt in genau einer Datei, doppelt geladen wird nichts.
         parts["base" if row["brand"] else "vegan"].append(spot)

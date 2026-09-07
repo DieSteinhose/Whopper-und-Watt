@@ -84,27 +84,50 @@ Browser (PWA)          Server (Python, nur Standardbibliothek)      einmalig
 
 `server/ingest.py` baut sie in zwei Schritten:
 
-1. **Lokale**, vier Abfragen über eine Bounding-Box: eine für die Ketten über `brand:wikidata`
-   und Namen, dann je eine pro `amenity` für alles mit einem `diet:vegan`-Tag. Der Ingest holt
-   immer alles, ausgewählt wird erst in der App.
+1. **Lokale**, zwei Abfragen über eine Bounding-Box: eine für die Ketten über `brand:wikidata`
+   und Namen, eine für alles mit einem `diet:vegan`-Tag. Der Ingest holt immer alles,
+   ausgewählt wird erst in der App.
 2. **Ladesäulen** in einem festen 8×8-Raster über den Suchbereich, Zellen ohne Lokal fallen weg.
 
-Gefiltert wird bei Schritt 1 auf das *Vorhandensein* von `diet:vegan`, nicht auf seine Werte:
-das Tag hängt in der Gastronomie an 20.010 Objekten, `amenity=restaurant` allein an 138.261.
-Die Instanz greift damit auf den kleinen Index zu. Die 6.290 Lokale mit `diet:vegan=no` kommen
-unnötig mit und fliegen in Python raus, das ist billiger als eine Wertabfrage mit Alternativen.
+Gefiltert wird bei Schritt 1 auf das *Vorhandensein* von `diet:vegan`, nicht auf seine Werte
+und nicht auf die Art des Lokals: das Tag hängt in der Gastronomie an 20.010 Objekten,
+`amenity=restaurant` allein an 138.261. Die Instanz greift damit auf den kleinen Index zu.
+Die 6.290 Lokale mit `diet:vegan=no` und die paar Automaten und Läden kommen unnötig mit und
+fliegen in Python raus. Gemessen: drei Abfragen mit `amenity`-Filter zusammen 383 Sekunden,
+diese eine 154.
 
 **Warum ein Raster statt Boxen um jedes Lokal.** Schritt 2 lief früher in 1-km-Boxen um jede
 einzelne Filiale, in Blöcken zu 20. Das war richtig, solange es um knapp zweitausend Filialen
 ging (87 Abfragen). Mit den veganen Lokalen sind es über fünfzehntausend, also wären rund
 achthundert Abfragen daraus geworden. Ein Raster über Deutschland sind dagegen 63, und zwar
-unabhängig davon, wie viele Lokale noch dazukommen. Gemessener Lauf: **924 Sekunden für 15.189
-Lokale, 58.335 Ladesäulen und 237.970 Paare.**
+unabhängig davon, wie viele Lokale noch dazukommen.
 
 Das Raster holt alle Säulen im Suchbereich, auch die weitab von jedem Lokal. Nach dem
 Paarebauen fliegen die wieder raus (58.335 → 25.456), sonst wäre die Datenbank 66 statt 51 MB.
 Wer den Abstand später über den `--gap` dieses Laufs hinaus vergrößern will, braucht deshalb
 einen frischen Ingest oder von vornherein `--keep-all-chargers`.
+
+**Zwei Abfragen gleichzeitig.** Ein großer Teil der Zeit ist Warteschlange, nicht Rechnen.
+Gemessen an disjunkten Rasterzellen auf `overpass.openstreetmap.fr`: eine Abfrage nach der
+anderen 175 Objekte/s, zwei gleichzeitig 331, drei 521. Bei zwei bleibt es trotzdem, denn das
+ist es, was die öffentlichen Instanzen je IP zugestehen; wer eine eigene Instanz betreibt,
+dreht `--workers` hoch.
+
+Über *mehrere* Instanzen zu verteilen ist dagegen keine gute Idee, auch gemessen: dieselben
+acht Zellen brauchten sequenziell auf `openstreetmap.fr` 31 Sekunden, verteilt auf vier
+Instanzen 174, weil drei davon mit HTTP 504 ausstiegen. Die anderen Endpunkte bleiben deshalb
+das, was sie sind: Ausweichlager, wenn der erste nicht antwortet.
+
+**Was das zusammen gebracht hat**, derselbe Datenbestand, dieselbe Bounding-Box:
+
+| | vorher | nachher |
+|---|---:|---:|
+| Lokale abfragen | 640 s (4 Abfragen) | 259 s (2, gleichzeitig) |
+| Ladesäulen-Raster | 280 s (63 nacheinander) | 114 s (63, zwei gleichzeitig) |
+| Paare, Index, Aufräumen | 4 s | 22 s |
+| **Gesamtlauf** | **924 s** | **395 s** |
+
+Ergebnis identisch: 15.189 Lokale, 58.335 gefundene Ladesäulen, 237.970 Paare.
 
 **Warum Bounding-Box und nicht Landesfläche:** die naheliegendere Abfrage
 `area["ISO3166-1"="DE"]` setzt voraus, dass die Overpass-Instanz eine Area-Datenbank hat.
@@ -119,10 +142,11 @@ die Lokale kommen in einen R-Tree-Index. Eine Suche ist damit ein Index-Zugriff 
 Arithmetik.
 
 ```bash
-python3 server/ingest.py --db server/data/whopper.sqlite     # dauert rund 15 Minuten
+python3 server/ingest.py --db server/data/whopper.sqlite     # dauert rund 7 Minuten
 python3 server/ingest.py --pairs-only                        # nur Paare neu rechnen
 python3 server/ingest.py --bbox 46.4,9.5,49.0,17.2           # anderer Suchbereich
 python3 server/ingest.py --charger-grid 12                   # feineres Raster, kleinere Abfragen
+python3 server/ingest.py --workers 4                         # nur gegen eine eigene Instanz
 ```
 
 Der Lauf ist fortsetzbar: jede erledigte Rasterzelle wird sofort festgeschrieben, ein Abbruch
@@ -248,15 +272,32 @@ Nominatim und OSRM.
 
 | Datei | Inhalt | roh | gepackt | wann geladen |
 |---|---:|---:|---:|---|
-| `data/spots.json` | 1.651 Kettenfilialen | 2,8 MB | 445 KB | immer, beim Start |
-| `data/spots-vegan.json` | 12.655 vegane Lokale | 35,6 MB | 5,0 MB | erst beim Anhaken |
+| `data/spots.json` | 1.651 Kettenfilialen | 1,1 MB | 194 KB | immer, beim Start |
+| `data/spots-vegan.json` | 12.655 vegane Lokale | 8,9 MB | 1,56 MB | erst beim Anhaken |
 
-In einer Datei wären das 5,5 MB gepackt und 38 MB entpackt, die jede Installation beim Start
-herunterladen und durch `JSON.parse` schicken müsste, auch für eine Suche nach Burger King.
-Der Service Worker installiert deshalb nur den kleinen Teil vorab; der große landet beim ersten
-Abruf im Cache und ist ab dann ebenfalls offline da. Gemessen im Browser: eine Suche nach
-Burger King rührt `spots-vegan.json` nicht an, die erste vegane Suche kostet einmalig gut eine
-Sekunde, danach 8 ms.
+In einer ungekürzten Datei wären das 5,5 MB gepackt und 38 MB entpackt, die jede Installation
+beim Start herunterladen und durch `JSON.parse` schicken müsste, auch für eine Suche nach
+Burger King. Zwei Maßnahmen bringen das auf 1,75 MB:
+
+**Aufteilen.** Der Service Worker installiert nur den kleinen Teil vorab; der große landet beim
+ersten Abruf im Cache und ist ab dann ebenfalls offline da. Gemessen im Browser: eine Suche
+nach Burger King rührt `spots-vegan.json` nicht an, die erste vegane Suche kostet einmalig
+knapp eine Sekunde, danach 17 ms.
+
+**Säulenlisten kürzen.** In der Stadt liegen bei 1000 m im Schnitt 17 Ladesäulen an einem
+Lokal, und diese Listen waren der Löwenanteil der Datei. Exportiert werden je Lokal die drei
+nächsten EnBW- und die drei nächsten Fremdsäulen: 5,21 → 1,56 MB gepackt.
+
+Das kostet **keine** Treffer, denn die App braucht je Filterstellung nur zwei Dinge, und beide
+bleiben exakt: *gibt es hier überhaupt eine passende Säule bis X Meter* und *welche ist die
+nächste*. Die nächste EnBW-Säule ist die nächste bei jedem Abstand, der sie einschließt.
+Gekürzt wird je Klasse und nicht über beide zusammen, sonst könnte der EnBW-Filter ein Lokal
+verlieren, an dem zwar eine EnBW-Säule liegt, aber vier fremde näher dran sind. Im Browser
+gegengeprüft: dieselben 5, 95 und 1.934 Treffer wie mit der ungekürzten Datei.
+
+Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist `chargersCapped` mit,
+und die App schreibt dann "3+" statt "3". Mit Server steht dort weiterhin die exakte Zahl, denn
+dort kürzt nichts.
 
 **Anzeigegrenzen.** Eine vegane Suche über 100 km um Berlin liefert gemessen 1.934 Treffer.
 Die Liste zeigt die ersten 200 und sagt, wie viele es insgesamt sind; die Karte zeichnet
