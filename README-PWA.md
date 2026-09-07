@@ -159,7 +159,7 @@ GitHub-Konto oder eine Organisation **genau so heißt** und dort ein Repository 
 `whopperundwatt.github.io` liegt. Unter dem bestehenden Konto lautet die Adresse
 
 ```
-https://diesteinhose.github.io/enbe-plus-whopper/
+https://diesteinhose.github.io/enbw-plus-whopper/
 ```
 
 Deshalb sind alle Pfade in der App relativ: unter einem Unterverzeichnis würde jeder absolute
@@ -181,8 +181,14 @@ Deploy-Schritt fehl.
 4. **Image**: Container-Image mit eingebackenem Datenbestand nach `ghcr.io`.
 
 **GitHub-Eigenheit, die hier zählt:** geplante Läufe starten ausschließlich auf dem
-**Standard-Branch**. Solange dieser Branch nicht der Standard ist oder dorthin gemerged wurde,
-feuert der Zeitplan nicht. Von Hand über "Run workflow" geht es trotzdem.
+**Standard-Branch**. Der Branch `pwa` muss also der Standard sein, sonst feuert der Zeitplan
+nicht. Von Hand über "Run workflow" geht es trotzdem.
+
+**Der nächtliche Lauf betrifft nur die PWA**, und das ist kein Versehen. Die Android-App auf
+dem Branch `app` fragt OpenStreetMap zur Laufzeit, sie hat gar keinen Datenbestand, der
+veralten könnte. Ihr Preis dafür sind die 11 bis 459 Sekunden pro Suche, die überhaupt erst
+der Anlass für diese Bauform waren. Eine neue APK entsteht nur, wenn sich ihr Quelltext ändert,
+nicht weil in Bochum eine Ladesäule dazugekommen ist.
 
 ## Container
 
@@ -190,7 +196,7 @@ feuert der Zeitplan nicht. Von Hand über "Run workflow" geht es trotzdem.
 docker build -t whopper-watt .
 docker run -p 8000:8000 whopper-watt
 # oder fertig aus der Registry
-docker run -p 8000:8000 ghcr.io/diesteinhose/enbe-plus-whopper:latest
+docker run -p 8000:8000 ghcr.io/diesteinhose/enbw-plus-whopper:latest
 ```
 
 Kein Build-Schritt, keine Abhängigkeiten: Python plus ein paar hundert Kilobyte eigener Code

@@ -1,7 +1,7 @@
 services:
   whopper-watt:
     # Entweder das fertige Image aus der Registry ...
-    image: ghcr.io/diesteinhose/enbe-plus-whopper:latest
+    image: ghcr.io/diesteinhose/enbw-plus-whopper:latest
     # ... oder selbst bauen: dafuer die Zeile darueber auskommentieren.
     # build: .
     container_name: whopper-watt
