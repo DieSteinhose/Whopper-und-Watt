@@ -110,6 +110,27 @@ class GeoTest(unittest.TestCase):
         self.assertEqual(geo.parse_networks(""), [])
         self.assertEqual(geo.parse_networks("aral"), [])
 
+    def test_bicycle_charging_stations_are_not_chargers(self):
+        """amenity=charging_station steht in OSM auch an Fahrrad-Ladepunkten.
+
+        Gemessen waren 898 von 25456 Saeulen im Bestand keine Autoladesaeulen,
+        und sie steckten in 4811 Paaren: die App zeigte E-Bike-Ladepunkte als
+        Ladesaeule neben dem Burger King.
+        """
+        self.assertFalse(geo.is_car_charger({"motorcar": "no", "bicycle": "yes"}))
+        self.assertFalse(geo.is_car_charger({"name": "E-Bike Ladestation"}))
+        self.assertFalse(geo.is_car_charger({"operator": "bike-energy"}))
+        self.assertFalse(geo.is_car_charger({"name": "Pedelec-Ladestation"}))
+
+        self.assertTrue(geo.is_car_charger({"amenity": "charging_station"}))
+        self.assertTrue(geo.is_car_charger({"motorcar": "yes", "bicycle": "yes"}))
+        # bicycle=yes allein darf nichts wegwerfen: von den Saeulen, die nur so
+        # auffallen, tragen 269 trotzdem Autosteckertypen.
+        self.assertTrue(geo.is_car_charger({"bicycle": "yes", "socket:type2": "2"}))
+        # motorcar=yes zu verlangen ginge gar nicht, das Tag fehlt an 14652
+        # von 25456 Saeulen.
+        self.assertTrue(geo.is_car_charger({"operator": "EnBW"}))
+
     def test_power_parsing(self):
         self.assertEqual(geo.max_power_kw({"charging_station:output": "150 kW"}), 150)
         self.assertEqual(geo.max_power_kw({"maxpower": "50000 W"}), 50)

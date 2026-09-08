@@ -139,6 +139,28 @@ def box_around(lat: float, lon: float, meters: float) -> tuple[float, float, flo
     return lat - pad_lat, lon - pad_lon, lat + pad_lat, lon + pad_lon
 
 
+# amenity=charging_station steht in OSM auch an Fahrrad-Ladestationen. Gemessen
+# waren 898 von 25456 Saeulen im Bestand keine Autoladesaeulen, gut drei
+# Prozent, und sie steckten in 4811 Paaren: die App zeigte E-Bike-Ladepunkte
+# als "Ladesaeule" neben dem Burger King an.
+_BICYCLE_HINT = re.compile(r"e-?bike|fahrrad|bike-energy|pedelec", re.I)
+
+
+def is_car_charger(tags: dict) -> bool:
+    """Laedt hier ein Auto?
+
+    Zwei Merkmale reichen und sind belastbar: ein ausdrueckliches motorcar=no,
+    und ein Name oder Betreiber, der vom Fahrrad spricht. Ueber bicycle=yes zu
+    gehen waere verlockend, aber falsch: von den Saeulen, die nur so auffallen,
+    tragen 269 trotzdem Autosteckertypen. Und motorcar=yes zu verlangen ginge
+    gar nicht, das Tag fehlt an 14652 von 25456 Saeulen.
+    """
+    if (tags.get("motorcar") or "").strip().lower() == "no":
+        return False
+    haystack = " ".join(filter(None, (tags.get("name"), tags.get("operator"), tags.get("brand"))))
+    return not _BICYCLE_HINT.search(haystack)
+
+
 def matches_network(tags: dict, network: Network) -> bool:
     if any(key.lower().startswith(f"ref:{network.key}") for key in tags):
         return True

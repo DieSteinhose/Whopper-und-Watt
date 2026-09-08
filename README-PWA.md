@@ -82,6 +82,14 @@ Die Wikidata-Ids sind am Datenbestand geprüft, nicht aus dem Kopf. Dabei kam he
 bisherige EnBW-Anker `Q321820` deutschlandweit **null mal** vorkommt und damit wirkungslos war;
 gerettet hat das nur die Namenssuche. Richtig ist `Q644304`, an 919 Säulen.
 
+**Fahrrad-Ladestationen zaehlen nicht mit.** `amenity=charging_station` steht in OSM auch an
+E-Bike-Ladepunkten. Gemessen waren 898 von 25.456 Säulen im Bestand keine Autoladesäulen, gut
+drei Prozent, und sie steckten in 4.811 Paaren: die App zeigte E-Bike-Ladepunkte als Ladesäule
+neben dem Burger King. Aussortiert wird über `motorcar=no` oder einen Namen, der vom Fahrrad
+spricht. Über `bicycle=yes` zu gehen wäre verlockend und falsch, davon tragen 269 trotzdem
+Autosteckertypen; und `motorcar=yes` zu verlangen ginge gar nicht, das Tag fehlt an 14.652 von
+25.456 Säulen.
+
 **Die Leistungsangabe fehlt oft.** Von 25.456 Säulen im Bestand haben 9.188 überhaupt eine
 Leistung in OSM, also gut ein Drittel. "ab 50 kW" blendet alles ohne Angabe aus, und das steht
 im Tooltip des Knopfs. Eine Säule ohne Tag ist nicht langsam, sie ist unbekannt.
@@ -321,8 +329,8 @@ Nominatim und OSRM.
 
 | Datei | Inhalt | roh | gepackt | wann geladen |
 |---|---:|---:|---:|---|
-| `data/spots.json` | 1.651 Kettenfilialen | 1,1 MB | 194 KB | immer, beim Start |
-| `data/spots-vegan.json` | 12.655 vegane Lokale | 8,7 MB | 1,52 MB | erst beim Anhaken |
+| `data/spots.json` | 1.650 Kettenfilialen | 1,1 MB | 193 KB | immer, beim Start |
+| `data/spots-vegan.json` | 12.596 vegane Lokale | 8,6 MB | 1,51 MB | erst beim Anhaken |
 
 In einer ungekürzten Datei wären das 5,5 MB gepackt und 38 MB entpackt, die jede Installation
 beim Start herunterladen und durch `JSON.parse` schicken müsste, auch für eine Suche nach

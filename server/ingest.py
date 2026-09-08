@@ -53,6 +53,7 @@ from geo import (  # noqa: E402
     chunked,
     has_vegan_options,
     haversine_m,
+    is_car_charger,
     is_enbw,
     is_vegan_only,
     network_of,
@@ -544,7 +545,7 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
     for element in payload.get("elements", []):
         point = element_point(element)
         tags = element.get("tags") or {}
-        if not point:
+        if not point or not is_car_charger(tags):
             continue
         rows.append(
             (
@@ -599,6 +600,27 @@ def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
     connection.commit()
     print(f"  {len(rows)} Paare bis {gap_m:.0f} m", flush=True)
     return len(rows)
+
+
+def drop_non_car_chargers(connection: sqlite3.Connection) -> int:
+    """Wirft Fahrrad-Ladestationen aus einem bestehenden Bestand.
+
+    Neue Laeufe filtern schon beim Einlesen. Diese Funktion raeumt auf, was in
+    einer aelteren Datenbank oder im Actions-Cache noch liegt, ohne dass dafuer
+    neu abgefragt werden muesste.
+    """
+    weg = [
+        row["id"]
+        for row in connection.execute("SELECT id, tags FROM charger")
+        if not is_car_charger(json.loads(row["tags"] or "{}"))
+    ]
+    if not weg:
+        return 0
+    connection.executemany("DELETE FROM charger WHERE id = ?", [(item,) for item in weg])
+    connection.executemany("DELETE FROM pair WHERE charger_id = ?", [(item,) for item in weg])
+    connection.commit()
+    print(f"  {len(weg)} Ladestationen ohne Auto verworfen", flush=True)
+    return len(weg)
 
 
 def prune_chargers(connection: sqlite3.Connection) -> int:
@@ -713,6 +735,7 @@ def main() -> int:
         )
 
     print("Paare berechnen", flush=True)
+    drop_non_car_chargers(connection)
     pairs = build_pairs(connection, arguments.gap)
     if not arguments.keep_all_chargers:
         prune_chargers(connection)
