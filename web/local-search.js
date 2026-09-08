@@ -64,10 +64,17 @@ async function load(kinds) {
   return merged;
 }
 
-function usableChargers(spot, gapM, onlyEnbw) {
-  return spot.chargers.filter(
-    (charger) => charger.gapM <= gapM && (!onlyEnbw || charger.isEnbw),
-  );
+// Dieselben Bedingungen wie _chargers_for im Server. Eine leere Netzliste
+// heisst: alle Netze. Eine Mindestleistung schliesst Saeulen ohne
+// Leistungsangabe aus, und das sind in OSM knapp zwei Drittel.
+function usableChargers(spot, { gapM, networks, minPowerKw }) {
+  const wanted = networks ?? [];
+  return spot.chargers.filter((charger) => {
+    if (charger.gapM > gapM) return false;
+    if (wanted.length && !wanted.includes(charger.network)) return false;
+    if (minPowerKw > 0 && !(charger.powerKw >= minPowerKw)) return false;
+    return true;
+  });
 }
 
 // Dieselben Bedingungen wie KIND_CONDITIONS im Server. Die Kategorien sind ein
@@ -104,7 +111,7 @@ export const localBackend = {
       if (!wantedKind(spot, params.kinds)) continue;
       const distance = haversineM(center.lat, center.lon, spot.lat, spot.lon);
       if (distance > radiusM) continue;
-      const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);
+      const chargers = usableChargers(spot, params);
       if (!chargers.length) continue;
       spots.push({ ...spot, chargers, distanceM: Math.round(distance) });
     }
@@ -149,7 +156,7 @@ export const localBackend = {
       if (!wantedKind(spot, params.kinds)) continue;
       const match = routeMatch(thin.points, cumulative, thin.seconds, spot.lat, spot.lon);
       if (match.offsetM > params.corridorM) continue;
-      const chargers = usableChargers(spot, params.gapM, params.onlyEnbw);
+      const chargers = usableChargers(spot, params);
       if (!chargers.length) continue;
       spots.push({
         ...spot,

@@ -85,7 +85,15 @@
         <button class="chip" data-gap="300" aria-pressed="true">300 m</button>
         <button class="chip" data-gap="500">500 m</button>
         <button class="chip" data-gap="1000">1000 m</button>
-        <button class="chip" id="enbwChip" aria-pressed="true">nur EnBW</button>
+      </div>
+
+      <div class="row chips" id="networkChips">
+        <span class="label" id="networkLabel">Ladesäule</span>
+        <button class="chip" data-network="enbw" aria-pressed="true">EnBW</button>
+        <button class="chip" data-network="lidl" aria-pressed="false">Lidl</button>
+        <button class="chip" data-network="kaufland" aria-pressed="false">Kaufland</button>
+        <button class="chip" data-power="50" aria-pressed="false"
+                title="Nur Säulen ab 50 kW. Zählt nur, was in OSM eine Leistungsangabe hat, und das ist gut ein Drittel.">ab 50 kW</button>
       </div>
     </div>
   </section>

@@ -55,6 +55,7 @@ from geo import (  # noqa: E402
     haversine_m,
     is_enbw,
     is_vegan_only,
+    network_of,
     lat_degrees_for_meters,
     lon_degrees_for_meters,
     matches_brand,
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS charger (
     lon REAL NOT NULL,
     operator TEXT,
     is_enbw INTEGER NOT NULL,
+    network TEXT,
     power_kw REAL,
     capacity TEXT,
     fee TEXT,
@@ -134,18 +136,21 @@ CREATE VIRTUAL TABLE IF NOT EXISTS store_rtree USING rtree(rowid, min_lat, max_l
 """
 
 # Spalten, die spaeter dazugekommen sind. Eine bestehende Datenbank soll nicht
-# weggeworfen werden muessen, nur weil die veganen Lokale dazugekommen sind.
+# weggeworfen werden muessen, nur weil eine Kategorie dazugekommen ist.
 ADDED_STORE_COLUMNS = {
     "amenity": "TEXT",
     "vegan": "INTEGER NOT NULL DEFAULT 0",
     "vegan_only": "INTEGER NOT NULL DEFAULT 0",
 }
+ADDED_CHARGER_COLUMNS = {"network": "TEXT"}
 
 # Erst nach der Migration, denn ein Index auf einer Spalte, die es in einer
 # aelteren Datenbank noch nicht gibt, laesst sich nicht anlegen.
 SCHEMA_INDEXES = """
 CREATE INDEX IF NOT EXISTS store_by_vegan ON store(vegan);
 CREATE INDEX IF NOT EXISTS store_by_vegan_only ON store(vegan_only);
+CREATE INDEX IF NOT EXISTS charger_by_network ON charger(network);
+CREATE INDEX IF NOT EXISTS charger_by_power ON charger(power_kw);
 """
 
 
@@ -161,15 +166,35 @@ def connect(path: Path) -> sqlite3.Connection:
 
 def migrate(connection: sqlite3.Connection) -> list[str]:
     """Fehlende Spalten nachziehen. Gibt zurueck, was ergaenzt wurde."""
-    present = {row["name"] for row in connection.execute("PRAGMA table_info(store)")}
     added = []
-    for column, definition in ADDED_STORE_COLUMNS.items():
-        if column not in present:
-            connection.execute(f"ALTER TABLE store ADD COLUMN {column} {definition}")
-            added.append(column)
+    for table, columns in (("store", ADDED_STORE_COLUMNS), ("charger", ADDED_CHARGER_COLUMNS)):
+        present = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column, definition in columns.items():
+            if column not in present:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                added.append(f"{table}.{column}")
     if added:
         connection.commit()
+    if "charger.network" in added:
+        backfill_networks(connection)
     return added
+
+
+def backfill_networks(connection: sqlite3.Connection) -> int:
+    """Netz aus den gespeicherten Tags nachtragen, ohne neu abzufragen.
+
+    Die Tags liegen ohnehin in der Datenbank. Eine bestehende Datenbank muss
+    also nicht wegen einer neuen Spalte fuenf Minuten Overpass kosten.
+    """
+    rows = [
+        (network_of(json.loads(row["tags"] or "{}")), row["id"])
+        for row in connection.execute("SELECT id, tags FROM charger")
+    ]
+    connection.executemany("UPDATE charger SET network = ? WHERE id = ?", rows)
+    connection.commit()
+    filled = sum(1 for network, _ in rows if network)
+    print(f"  Netz fuer {filled} von {len(rows)} Saeulen aus den Tags nachgetragen", flush=True)
+    return filled
 
 
 def overpass(query: str, timeout: int = 600, attempts: int = 4) -> dict:
@@ -528,6 +553,7 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
                 point[1],
                 tags.get("operator") or tags.get("network") or tags.get("name"),
                 1 if is_enbw(tags) else 0,
+                network_of(tags),
                 max_power_kw(tags),
                 tags.get("capacity"),
                 tags.get("fee"),
@@ -536,8 +562,8 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
         )
     connection.executemany(
         "INSERT OR REPLACE INTO charger"
-        " (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " (id, lat, lon, operator, is_enbw, network, power_kw, capacity, fee, tags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)

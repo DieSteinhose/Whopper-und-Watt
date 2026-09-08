@@ -31,7 +31,14 @@ from urllib.parse import parse_qs, urlparse
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import SpotDatabase  # noqa: E402
-from geo import DEFAULT_KINDS, KINDS, parse_kinds  # noqa: E402
+from geo import (  # noqa: E402
+    DEFAULT_KINDS,
+    FAST_CHARGER_KW,
+    KINDS,
+    NETWORKS,
+    parse_kinds,
+    parse_networks,
+)
 import plan  # noqa: E402
 import routing  # noqa: E402
 
@@ -41,6 +48,7 @@ MAX_WAYPOINTS = 25
 MAX_RADIUS_M = 200_000
 MAX_CORRIDOR_M = 20_000
 MAX_GAP_M = 2_000
+MAX_POWER_KW = 1_000
 
 # Dateien, die sich nie aendern, duerfen lange im Browser bleiben.
 LONG_CACHE = ("/vendor/", "/icons/")
@@ -173,6 +181,10 @@ class Handler(BaseHTTPRequestHandler):
         # Welche Kategorien die App anbieten darf, entscheidet der Datenbestand.
         meta["availableKinds"] = [{"key": kind.key, "label": kind.label} for kind in KINDS.values()]
         meta["defaultKinds"] = list(DEFAULT_KINDS)
+        meta["availableNetworks"] = [
+            {"key": network.key, "label": network.label} for network in NETWORKS.values()
+        ]
+        meta["fastChargerKw"] = FAST_CHARGER_KW
         meta["ok"] = True
         return meta
 
@@ -181,16 +193,22 @@ class Handler(BaseHTTPRequestHandler):
         lon = _number(query, "lon", required=True)
         radius_m = min(_number(query, "radius_km", default=25) * 1000, MAX_RADIUS_M)
         gap_m = min(_number(query, "gap_m", default=300), MAX_GAP_M)
-        only_enbw = _flag(query, "only_enbw", default=True)
+        networks = parse_networks((query.get("networks") or [None])[0])
+        min_power_kw = min(_number(query, "min_power_kw", default=0), MAX_POWER_KW)
         kinds = parse_kinds((query.get("kinds") or [None])[0])
 
         keys = [kind.key for kind in kinds]
-        spots = self.database.spots_near(lat, lon, radius_m, gap_m, only_enbw, keys)
+        network_keys = [network.key for network in networks]
+        spots = self.database.spots_near(
+            lat, lon, radius_m, gap_m, network_keys, min_power_kw, keys
+        )
         return {
             "mode": "radius",
             "center": {"lat": lat, "lon": lon},
             "radiusM": radius_m,
             "kinds": keys,
+            "networks": network_keys,
+            "minPowerKw": min_power_kw,
             "spots": spots,
             "queryMs": round((time.time() - started) * 1000, 1),
         }
@@ -207,7 +225,8 @@ class Handler(BaseHTTPRequestHandler):
     def _route_spots(self, body: dict, started: float) -> dict:
         corridor_m = min(float(body.get("corridorM", 3000)), MAX_CORRIDOR_M)
         gap_m = min(float(body.get("gapM", 300)), MAX_GAP_M)
-        only_enbw = bool(body.get("onlyEnbw", True))
+        networks = parse_networks(",".join(body.get("networks") or []))
+        min_power_kw = min(float(body.get("minPowerKw", 0)), MAX_POWER_KW)
         kinds = parse_kinds(",".join(body.get("kinds") or []))
 
         waypoints, label = self._waypoints(body)
@@ -217,12 +236,15 @@ class Handler(BaseHTTPRequestHandler):
             seconds=computed["cumulativeSeconds"],
             corridor_m=corridor_m,
             gap_m=gap_m,
-            only_enbw=only_enbw,
+            networks=[network.key for network in networks],
+            min_power_kw=min_power_kw,
             kinds=[kind.key for kind in kinds],
         )
         return {
             "mode": "route",
             "kinds": [kind.key for kind in kinds],
+            "networks": [network.key for network in networks],
+            "minPowerKw": min_power_kw,
             "route": {
                 "polyline": computed["polyline"],
                 "distanceM": computed["distanceM"],

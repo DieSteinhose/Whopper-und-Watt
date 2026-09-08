@@ -86,12 +86,29 @@ class GeoTest(unittest.TestCase):
         self.assertEqual(db_module.kind_filter(["'; DROP TABLE store; --", "vegan"]), "s.vegan = 1")
         self.assertEqual(db_module.kind_filter(["bk", "bk"]), "s.brand = 'bk'")
 
-    def test_enbw_detection(self):
+    def test_network_detection(self):
         self.assertTrue(geo.is_enbw({"operator": "EnBW mobility+"}))
         self.assertTrue(geo.is_enbw({"network": "enbw"}))
         self.assertTrue(geo.is_enbw({"ref:EnBW": "DE*ENB*1234"}))
-        self.assertTrue(geo.is_enbw({"operator:wikidata": "Q321820"}))
+        # Q644304, am Datenbestand geprueft: 919 Treffer. Hier stand vorher
+        # Q321820, und das kam in ganz Deutschland null mal vor. Der Anker war
+        # damit wirkungslos, gerettet hat es nur die Namenssuche.
+        self.assertTrue(geo.is_enbw({"operator:wikidata": "Q644304"}))
         self.assertFalse(geo.is_enbw({"operator": "IONITY"}))
+
+        self.assertEqual(geo.network_of({"operator:wikidata": "Q151954"}), "lidl")
+        self.assertEqual(geo.network_of({"operator": "Lidl Stiftung GmbH & Co. KG"}), "lidl")
+        self.assertEqual(geo.network_of({"operator:wikidata": "Q685967"}), "kaufland")
+        self.assertEqual(geo.network_of({"brand": "Kaufland"}), "kaufland")
+        self.assertIsNone(geo.network_of({"operator": "IONITY"}))
+        self.assertIsNone(geo.network_of({}))
+
+    def test_network_parsing_means_all_when_empty(self):
+        """Anders als bei den Kategorien heisst leer hier: kein Filter."""
+        self.assertEqual([n.key for n in geo.parse_networks("lidl,kaufland")], ["lidl", "kaufland"])
+        self.assertEqual([n.key for n in geo.parse_networks("lidl,lidl")], ["lidl"])
+        self.assertEqual(geo.parse_networks(""), [])
+        self.assertEqual(geo.parse_networks("aral"), [])
 
     def test_power_parsing(self):
         self.assertEqual(geo.max_power_kw({"charging_station:output": "150 kW"}), 150)
@@ -158,11 +175,12 @@ class DatabaseTest(unittest.TestCase):
         )
         # Saeule 1: EnBW, 50 m neben Filiale 1. Saeule 2: fremd, 60 m neben Filiale 2.
         connection.executemany(
-            "INSERT INTO charger (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, '{}')",
+            "INSERT INTO charger"
+            " (id, lat, lon, operator, is_enbw, network, power_kw, capacity, fee, tags)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')",
             [
-                ("node/10", 48.69235, 9.1946, "EnBW", 1, 150.0, "4", "yes"),
-                ("node/11", 48.77634, 9.1829, "IONITY", 0, 350.0, "6", "yes"),
+                ("node/10", 48.69235, 9.1946, "EnBW", 1, "enbw", 150.0, "4", "yes"),
+                ("node/11", 48.77634, 9.1829, "IONITY", 0, None, 350.0, "6", "yes"),
             ],
         )
         connection.commit()
@@ -177,26 +195,98 @@ class DatabaseTest(unittest.TestCase):
 
     def test_radius_search_finds_only_nearby(self):
         spots = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, only_enbw=True, kinds=["bk"]
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300, networks=["enbw"], kinds=["bk"]
         )
         self.assertEqual([spot["id"] for spot in spots], ["node/1"])
         self.assertEqual(spots[0]["chargers"][0]["gapM"], 50)
         self.assertEqual(spots[0]["distanceM"], 0)
 
-    def test_enbw_filter_hides_foreign_operators(self):
+    def test_network_filter_hides_foreign_operators(self):
         near_stuttgart = (48.7758, 9.1829)
-        only_enbw = self.database.spots_near(
-            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=True, kinds=["bk"]
+        nur_enbw = self.database.spots_near(
+            *near_stuttgart, radius_m=5_000, gap_m=300, networks=["enbw"], kinds=["bk"]
         )
         everyone = self.database.spots_near(
-            *near_stuttgart, radius_m=5_000, gap_m=300, only_enbw=False, kinds=["bk"]
+            *near_stuttgart, radius_m=5_000, gap_m=300, networks=(), kinds=["bk"]
         )
-        self.assertEqual(only_enbw, [])
+        self.assertEqual(nur_enbw, [])
         self.assertEqual([spot["id"] for spot in everyone], ["node/2"])
+
+    def test_network_and_power_filter(self):
+        """Netzauswahl und Mindestleistung, beides auf der Saeulenseite."""
+        def ids(**kwargs):
+            return sorted(
+                spot["id"]
+                for spot in self.database.spots_near(
+                    *BK_ECHTERDINGEN, radius_m=25_000, gap_m=300,
+                    kinds=["bk", "subway", "vegan"], **kwargs
+                )
+            )
+
+        # Ohne Netzangabe zaehlen alle Netze, das ist bewusst anders als bei
+        # den Kategorien: dort heisst leer "nichts".
+        self.assertTrue(ids(networks=()))
+        self.assertEqual(ids(networks=["enbw"]), ids(networks=["enbw", "lidl"]))
+        self.assertEqual(ids(networks=["lidl"]), [])
+
+        # Die EnBW-Saeule an Lokal 1 hat 150 kW, die IONITY bei Stuttgart 350.
+        # Ab 200 kW bleibt deshalb nur noch Stuttgart uebrig.
+        self.assertEqual(ids(networks=(), min_power_kw=50), ids(networks=()))
+        self.assertEqual(ids(networks=(), min_power_kw=200), ["node/2"])
+        self.assertEqual(ids(networks=(), min_power_kw=400), [])
+        # Netz und Leistung wirken zusammen, nicht wahlweise.
+        self.assertEqual(ids(networks=["enbw"], min_power_kw=200), [])
+
+        # Eine Saeule ohne Leistungsangabe faellt bei einer Mindestleistung raus.
+        connection = sqlite3.connect(self.database.path)
+        connection.execute("UPDATE charger SET power_kw = NULL WHERE id = 'node/10'")
+        connection.commit()
+        connection.close()
+        try:
+            self.assertEqual(ids(networks=["enbw"], min_power_kw=1), [])
+            self.assertTrue(ids(networks=["enbw"]))
+        finally:
+            connection = sqlite3.connect(self.database.path)
+            connection.execute("UPDATE charger SET power_kw = 150.0 WHERE id = 'node/10'")
+            connection.commit()
+            connection.close()
+
+    def test_gap_is_compared_on_whole_metres(self):
+        """Der Abstand wird gerundet ausgeliefert, also auch gerundet gefiltert.
+
+        Sonst stand an einer Saeule "300 m zur Saeule", und die 300-m-Suche
+        warf sie trotzdem raus, weil sie in Wahrheit bei 300,39 m lag. Genau
+        das trennte den Betrieb mit Server von dem ohne.
+        """
+        connection = sqlite3.connect(self.database.path)
+        connection.execute(
+            "INSERT OR REPLACE INTO pair (store_id, charger_id, gap_m)"
+            " VALUES ('node/1', 'node/11', 300.4)"
+        )
+        connection.commit()
+        connection.close()
+        try:
+            spot = self.database.spots_near(
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, networks=(), kinds=["bk"]
+            )[0]
+            gaps = [charger["gapM"] for charger in spot["chargers"]]
+            self.assertIn(300, gaps, "eine als 300 m ausgewiesene Saeule fehlt in der 300-m-Suche")
+            # Bei 299 m darf sie dagegen nicht mehr dabei sein.
+            spot = self.database.spots_near(
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=299, networks=(), kinds=["bk"]
+            )[0]
+            self.assertNotIn(300, [charger["gapM"] for charger in spot["chargers"]])
+        finally:
+            connection = sqlite3.connect(self.database.path)
+            connection.execute(
+                "DELETE FROM pair WHERE store_id='node/1' AND charger_id='node/11'"
+            )
+            connection.commit()
+            connection.close()
 
     def test_gap_filter(self):
         spots = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, only_enbw=True, kinds=["bk"]
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=20, networks=["enbw"], kinds=["bk"]
         )
         self.assertEqual(spots, [])
 
@@ -206,7 +296,7 @@ class DatabaseTest(unittest.TestCase):
             return sorted(
                 spot["id"]
                 for spot in self.database.spots_near(
-                    *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, kinds=kinds
+                    *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, networks=["enbw"], kinds=kinds
                 )
             )
 
@@ -237,7 +327,7 @@ class DatabaseTest(unittest.TestCase):
         exported = {spot["id"]: spot for spot in payload["spots"]}
 
         served = self.database.spots_near(
-            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=1000, only_enbw=False,
+            *BK_ECHTERDINGEN, radius_m=25_000, gap_m=1000, networks=(),
             kinds=["bk", "subway", "vegan", "vegan_only"],
         )
         self.assertTrue(served)
@@ -257,7 +347,8 @@ class DatabaseTest(unittest.TestCase):
         import export_static
 
         chargers = [
-            {"id": f"node/{index}", "isEnbw": index == 9, "gapM": index * 10}
+            {"id": f"node/{index}", "network": "enbw" if index == 9 else None,
+             "powerKw": 22.0, "gapM": index * 10}
             for index in range(10)
         ]
         kept, capped = export_static.cap_chargers(chargers, per_class=3)
@@ -265,15 +356,83 @@ class DatabaseTest(unittest.TestCase):
         # Drei naechste fremde plus die eine EnBW-Saeule, die am weitesten weg ist.
         self.assertEqual([item["id"] for item in kept], ["node/0", "node/1", "node/2", "node/9"])
 
+        # Schnelle und langsame Saeulen sind eigene Klassen, sonst koennte der
+        # Schnelllader-Filter ein Lokal verlieren, an dem eine schnelle Saeule
+        # liegt, die nur weiter weg ist als drei langsame.
+        mixed = [
+            {"id": "node/a", "network": None, "powerKw": 11.0, "gapM": 10},
+            {"id": "node/b", "network": None, "powerKw": 11.0, "gapM": 20},
+            {"id": "node/c", "network": None, "powerKw": 11.0, "gapM": 30},
+            {"id": "node/d", "network": None, "powerKw": 150.0, "gapM": 900},
+        ]
+        kept, capped = export_static.cap_chargers(mixed, per_class=2)
+        self.assertIn("node/d", [item["id"] for item in kept])
+        self.assertTrue(capped)
+
         # Ohne Kuerzung bleibt alles, und dann ist nichts weggefallen.
         kept, capped = export_static.cap_chargers(chargers[:2], per_class=3)
         self.assertEqual(len(kept), 2)
         self.assertFalse(capped)
 
+    def test_capped_export_answers_like_the_full_list(self):
+        """Die Kuerzung darf keine einzige Filterstellung der App veraendern.
+
+        Geprueft wird jede Kombination aus Netzauswahl, Leistungsstufe und
+        Abstand gegen die ungekuerzte Liste: gibt es einen Treffer, und welche
+        ist die naechste passende Saeule.
+
+        Der Test haengt an geo.POWER_STEPS. Genau daran ist es beim Bauen
+        schiefgegangen: die Klassen trennten nur bei 50 kW, und eine 150-kW-
+        Abfrage verlor deshalb 47 Lokale, weil je zwei langsamere Saeulen
+        naeher dran waren.
+        """
+        import itertools
+
+        import export_static
+
+        # Ein bewusst gemeiner Standort: die schnellen Saeulen sind weiter weg
+        # als die langsamen, und die Ketten-Saeulen weiter als die fremden.
+        chargers = []
+        for index, (network, power) in enumerate([
+            (None, 11.0), (None, 22.0), (None, None), (None, 22.0),
+            ("enbw", 11.0), ("enbw", 22.0), (None, 50.0), (None, 150.0),
+            ("enbw", 150.0), ("lidl", 22.0), ("lidl", 300.0), ("kaufland", 11.0),
+            ("kaufland", 22.0), ("kaufland", 250.0), (None, 350.0),
+        ]):
+            chargers.append({"id": f"node/{index}", "network": network,
+                             "powerKw": power, "gapM": (index + 1) * 40})
+
+        kept, capped = export_static.cap_chargers(chargers)
+        self.assertTrue(capped, "der Testfall kuerzt gar nichts, er prueft also nichts")
+        self.assertLess(len(kept), len(chargers))
+
+        def nearest(source, networks, min_kw, gap):
+            passend = [
+                item for item in source
+                if item["gapM"] <= gap
+                and (not networks or item["network"] in networks)
+                and (min_kw <= 0 or (item["powerKw"] or 0) >= min_kw)
+            ]
+            return passend[0]["id"] if passend else None
+
+        keys = [None, "enbw", "lidl", "kaufland"]
+        combinations = 0
+        for size in range(len(keys) + 1):
+            for networks in itertools.combinations([k for k in keys if k], size):
+                for min_kw in geo.POWER_STEPS:
+                    for gap in (100, 300, 500, 1000):
+                        combinations += 1
+                        self.assertEqual(
+                            nearest(kept, networks, min_kw, gap),
+                            nearest(chargers, networks, min_kw, gap),
+                            f"networks={networks} min_kw={min_kw} gap={gap}",
+                        )
+        self.assertGreater(combinations, 50)
+
     def test_labels_and_flags_travel_with_the_spot(self):
         def one(kinds):
             return self.database.spots_near(
-                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, only_enbw=True, kinds=kinds
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, networks=["enbw"], kinds=kinds
             )[0]
 
         subway = one(["subway"])
@@ -294,7 +453,7 @@ class DatabaseTest(unittest.TestCase):
         points = [BK_ECHTERDINGEN, (48.7758, 9.1829)]
         seconds = [0.0, 900.0]
         spots = self.database.spots_along_route(
-            points=points, seconds=seconds, corridor_m=2000, gap_m=300, only_enbw=False, kinds=["bk"]
+            points=points, seconds=seconds, corridor_m=2000, gap_m=300, networks=(), kinds=["bk"]
         )
         self.assertEqual([spot["id"] for spot in spots], ["node/1", "node/2"])
         self.assertLess(spots[0]["routeProgressM"], spots[1]["routeProgressM"])
@@ -304,7 +463,7 @@ class DatabaseTest(unittest.TestCase):
     def test_route_corridor_excludes_detours(self):
         points = [(48.60, 9.19), (48.66, 9.19)]  # endet vor Echterdingen
         spots = self.database.spots_along_route(
-            points=points, seconds=None, corridor_m=1000, gap_m=300, only_enbw=False, kinds=["bk"]
+            points=points, seconds=None, corridor_m=1000, gap_m=300, networks=(), kinds=["bk"]
         )
         self.assertEqual(spots, [])
 

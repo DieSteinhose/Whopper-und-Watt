@@ -133,11 +133,18 @@ jobs:
           chargers = sum(len(spot["chargers"]) for part in (base, vegan) for spot in part["spots"])
           chains = sum(1 for spot in base["spots"] if spot["brand"])
           only = sum(1 for part in (base, vegan) for spot in part["spots"] if spot["veganOnly"])
+          netze = {}
+          for part in (base, vegan):
+              for spot in part["spots"]:
+                  for charger in spot["chargers"]:
+                      key = charger["network"] or "(anderes)"
+                      netze[key] = netze.get(key, 0) + 1
 
           print(f"Stand {base['meta'].get('ingested_at')}, {chargers} Ladesaeulen")
           print(f"  spots.json       {len(base['spots']):6d} Lokale, davon {chains} aus einer Kette")
           print(f"  spots-vegan.json {len(vegan['spots']):6d} Lokale")
           print(f"  rein vegan       {only:6d}")
+          print("  Netze: " + ", ".join(f"{n} {k}" for k, n in sorted(netze.items())))
 
           # Ein leerer oder halber Bestand darf nicht online gehen. Die Schwellen
           # sind bewusst deutlich unter den gemessenen Zahlen (1651 / 12655 / 509):
@@ -156,6 +163,12 @@ jobs:
           off = [spot["id"] for spot in vegan["spots"] if not spot["vegan"] or spot["brand"]][:5]
           if off:
               sys.exit(f"Nicht-vegane oder Ketten-Eintraege im Zusatzteil: {off}")
+          # Die Netz-Knoepfe der App muessen etwas zu zeigen haben. Bleibt eine
+          # Spalte leer, hat sich in OSM die Schreibweise geaendert oder die
+          # Erkennung ist kaputt, und der Knopf faende nichts.
+          for key in ("enbw", "lidl", "kaufland"):
+              if netze.get(key, 0) < 20:
+                  sys.exit(f"Fast keine Saeulen im Netz {key} ({netze.get(key, 0)}), Erkennung pruefen")
           PY
 
       # Nur der statische Export wandert weiter. Die Datenbank bleibt im Cache,

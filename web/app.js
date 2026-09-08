@@ -39,7 +39,10 @@ const state = {
   radiusKm: 25,
   corridorM: 3000,
   gapM: 300,
-  onlyEnbw: true,
+  // Leere Netzliste hiesse alle Netze. EnBW ist die Voreinstellung, weil das
+  // die urspruengliche Frage dieser App ist, und ist abwaehlbar.
+  networks: ['enbw'],
+  minPowerKw: 0,
   departure: null, // null bedeutet "jetzt"
   spots: [],
   route: null,
@@ -61,6 +64,8 @@ const view = {
   radiusForm: document.getElementById('radiusForm'),
   routeForm: document.getElementById('routeForm'),
   kindChips: document.getElementById('kindChips'),
+  networkChips: document.getElementById('networkChips'),
+  networkLabel: document.getElementById('networkLabel'),
   radiusChips: document.getElementById('radiusChips'),
   corridorChips: document.getElementById('corridorChips'),
   departureLabel: document.getElementById('departureLabel'),
@@ -114,6 +119,11 @@ const KIND_LABELS = {
   vegan: 'Vegane Optionen',
   vegan_only: 'Rein vegan',
 };
+
+const NETWORK_LABELS = { enbw: 'EnBW', lidl: 'Lidl', kaufland: 'Kaufland' };
+
+// Ab hier gilt eine Saeule als Schnelllader, wie im Server (geo.FAST_CHARGER_KW).
+const FAST_CHARGER_KW = 50;
 
 // Obergrenzen fuer die Anzeige. Mit den veganen Kategorien liefert eine Suche
 // ueber 100 km um Berlin gemessen 1934 Treffer. Ungebremst waren das rund 20000
@@ -189,7 +199,8 @@ function searchParams() {
     radiusKm: state.radiusKm,
     corridorM: state.corridorM,
     gapM: state.gapM,
-    onlyEnbw: state.onlyEnbw,
+    networks: state.networks,
+    minPowerKw: state.minPowerKw,
   };
 }
 
@@ -576,11 +587,32 @@ view.kindChips.addEventListener('click', (event) => {
   rerunIfSearched();
 });
 
-document.getElementById('enbwChip').addEventListener('click', (event) => {
-  state.onlyEnbw = !state.onlyEnbw;
-  event.target.setAttribute('aria-pressed', String(state.onlyEnbw));
+view.networkChips.addEventListener('click', (event) => {
+  const key = event.target.dataset?.network;
+  if (key) {
+    state.networks = state.networks.includes(key)
+      ? state.networks.filter((item) => item !== key)
+      : [...state.networks, key];
+    event.target.setAttribute('aria-pressed', String(state.networks.includes(key)));
+    updateNetworkLabel();
+    rerunIfSearched();
+    return;
+  }
+  if (event.target.dataset?.power === undefined) return;
+  state.minPowerKw = state.minPowerKw > 0 ? 0 : FAST_CHARGER_KW;
+  event.target.setAttribute('aria-pressed', String(state.minPowerKw > 0));
+  updateNetworkLabel();
   rerunIfSearched();
 });
+
+// Kein Netz angehakt heisst hier alle Netze, anders als bei den Kategorien.
+// Das steht deshalb in der Beschriftung, statt es erraten zu lassen.
+function updateNetworkLabel() {
+  const chosen = state.networks.map((key) => NETWORK_LABELS[key] ?? key);
+  const parts = [chosen.length ? chosen.join(', ') : 'alle Netze'];
+  if (state.minPowerKw > 0) parts.push(`ab ${FAST_CHARGER_KW} kW`);
+  view.networkLabel.textContent = `Ladesäule: ${parts.join(', ')}`;
+}
 
 document.getElementById('departureChips').addEventListener('click', (event) => {
   const value = event.target.dataset?.departure;
@@ -669,6 +701,7 @@ if ('serviceWorker' in navigator) {
 }
 
 updateDepartureLabel();
+updateNetworkLabel();
 render();
 
 pickBackend()

@@ -31,55 +31,64 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from db import spot_payload  # noqa: E402
+from db import charger_payload, spot_payload  # noqa: E402
+from geo import POWER_STEPS, power_step  # noqa: E402
 
 # Der Zusatzteil heisst wie die Hauptdatei, nur mit diesem Anhaengsel.
 VEGAN_SUFFIX = "-vegan"
 
-# Je Lokal hoechstens so viele Saeulen je Klasse (EnBW und fremd) mitgeben.
+# Je Lokal hoechstens so viele Saeulen je Klasse mitgeben.
 #
 # In der Stadt liegen bei 1000 m im Schnitt 17 Saeulen an einem Lokal, und
-# diese Listen sind der Loewenanteil der Datei: ungekuerzt 5,21 MB gepackt,
-# mit drei je Klasse 1,59 MB. Ohne Verlust an Aussagekraft, denn die App
-# braucht je Filterstellung nur zwei Dinge, und beide bleiben exakt:
+# diese Listen sind der Loewenanteil der Datei. Ohne Verlust an Aussagekraft,
+# denn die App braucht je Filterstellung nur zwei Dinge, und beide bleiben
+# exakt:
 #
 #   "gibt es hier ueberhaupt eine passende Saeule bis X Meter?"
 #   "welche ist die naechste und was steht an ihr?"
 #
 # Die naechste EnBW-Saeule ist die naechste bei jedem Abstand, der sie
-# einschliesst, und bei kleinerem Abstand gibt es gar keine. Genau deshalb
-# wird je Klasse gekuerzt und nicht ueber beide zusammen: sonst koennte der
-# EnBW-Filter eine Filiale verlieren, an der zwar eine EnBW-Saeule liegt,
-# aber vier fremde naeher dran sind.
+# einschliesst, und bei kleinerem Abstand gibt es gar keine. Deshalb wird je
+# Klasse gekuerzt und nicht ueber alle zusammen: sonst koennte der EnBW-Filter
+# ein Lokal verlieren, an dem zwar eine EnBW-Saeule liegt, aber vier fremde
+# naeher dran sind. Eine Klasse ist ein Paar aus Netz und Leistungsstufe,
+# denn genau danach laesst sich in der App filtern.
+#
+# Die Stufen stehen in geo.POWER_STEPS. Kommt in der App ein Knopf "ab 150 kW"
+# dazu, muss die Stufe dort ergaenzt werden, sonst faellt eine 150-kW-Saeule
+# aus der Datei, sobald zwei langsamere naeher dran sind. Genau das ist beim
+# Bauen passiert und hat 47 Lokale gekostet.
 #
 # Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist
 # chargersCapped mit, und die App schreibt dann "N+".
-CHARGERS_PER_CLASS = 3
+CHARGERS_PER_CLASS = 2
 
 
 def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     chargers: dict[str, list[dict]] = {}
     query = (
-        "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.is_enbw,"
+        "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.network,"
         " c.power_kw, c.capacity, c.fee"
         " FROM pair p JOIN charger c ON c.id = p.charger_id"
         " ORDER BY p.store_id, p.gap_m"
     )
     for row in connection.execute(query):
-        chargers.setdefault(row["store_id"], []).append(
-            {
-                "id": row["id"],
-                "lat": round(row["lat"], 6),
-                "lon": round(row["lon"], 6),
-                "operator": row["operator"],
-                "isEnbw": bool(row["is_enbw"]),
-                "powerKw": row["power_kw"],
-                "capacity": row["capacity"],
-                "fee": row["fee"],
-                "gapM": round(row["gap_m"]),
-            }
-        )
+        charger = charger_payload(row)
+        charger["lat"] = round(charger["lat"], 6)
+        charger["lon"] = round(charger["lon"], 6)
+        chargers.setdefault(row["store_id"], []).append(charger)
     return chargers
+
+
+def charger_class(charger: dict) -> tuple[str | None, int]:
+    """Netz und Leistungsstufe. Genau danach filtert die App.
+
+    Fuer eine Abfrage ab Stufe s braucht die App die naechste Saeule mit
+    Stufe >= s. Wird je (Netz, Stufe) die naechste behalten, ist das Minimum
+    ueber alle Stufen >= s genau diese Saeule. Damit stimmt die gekuerzte
+    Datei fuer jede Stufe aus geo.POWER_STEPS, und nur fuer die.
+    """
+    return charger["network"], power_step(charger["powerKw"])
 
 
 def cap_chargers(chargers: list[dict], per_class: int = CHARGERS_PER_CLASS) -> tuple[list[dict], bool]:
@@ -91,11 +100,11 @@ def cap_chargers(chargers: list[dict], per_class: int = CHARGERS_PER_CLASS) -> t
     if per_class <= 0:
         return chargers, False
     kept: list[dict] = []
-    seen = {True: 0, False: 0}
+    seen: dict[tuple[str | None, bool], int] = {}
     for charger in chargers:
-        klass = bool(charger["isEnbw"])
-        if seen[klass] < per_class:
-            seen[klass] += 1
+        klass = charger_class(charger)
+        if seen.get(klass, 0) < per_class:
+            seen[klass] = seen.get(klass, 0) + 1
             kept.append(charger)
     return kept, len(kept) < len(chargers)
 

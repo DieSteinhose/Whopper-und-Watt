@@ -16,6 +16,7 @@ from geo import (
     AMENITY_LABELS,
     BRANDS,
     DEFAULT_KINDS,
+    NETWORKS,
     box_around,
     cumulative_distances,
     haversine_m,
@@ -72,7 +73,8 @@ class SpotDatabase:
         lon: float,
         radius_m: float,
         gap_m: float,
-        only_enbw: bool,
+        networks: Sequence[str] = (),
+        min_power_kw: float = 0.0,
         kinds: Sequence[str] = DEFAULT_KINDS,
     ) -> list[dict]:
         south, west, north, east = box_around(lat, lon, radius_m)
@@ -83,7 +85,7 @@ class SpotDatabase:
             distance = haversine_m(lat, lon, store["lat"], store["lon"])
             if distance > radius_m:
                 continue
-            chargers = self._chargers_for(store["id"], gap_m, only_enbw)
+            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw)
             if not chargers:
                 continue
             spot = self._spot(store, chargers)
@@ -101,7 +103,8 @@ class SpotDatabase:
         seconds: Sequence[float] | None,
         corridor_m: float,
         gap_m: float,
-        only_enbw: bool,
+        networks: Sequence[str] = (),
+        min_power_kw: float = 0.0,
         kinds: Sequence[str] = DEFAULT_KINDS,
     ) -> list[dict]:
         if len(points) < 2:
@@ -132,7 +135,7 @@ class SpotDatabase:
             )
             if offset > corridor_m:
                 continue
-            chargers = self._chargers_for(store["id"], gap_m, only_enbw)
+            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw)
             if not chargers:
                 continue
             spot = self._spot(store, chargers)
@@ -161,33 +164,58 @@ class SpotDatabase:
             (south, north, west, east),
         ).fetchall()
 
-    def _chargers_for(self, store_id: str, gap_m: float, only_enbw: bool) -> list[dict]:
+    def _chargers_for(
+        self,
+        store_id: str,
+        gap_m: float,
+        networks: Sequence[str] = (),
+        min_power_kw: float = 0.0,
+    ) -> list[dict]:
+        """Saeulen zu einem Lokal, gefiltert nach Abstand, Netz und Leistung.
+
+        Eine leere Netzliste heisst: alle Netze. Eine Mindestleistung schliesst
+        Saeulen ohne Leistungsangabe aus, und das sind in OSM knapp zwei
+        Drittel. Die App muss das dazusagen, sonst sieht es aus wie ein
+        Datenfehler.
+        """
+        # Verglichen wird auf ganze Meter, denn genau so geht der Abstand auch
+        # nach draussen und steht in der App. Ungerundet zu filtern hiess, eine
+        # Saeule bei 300,39 m als "300 m zur Saeule" zu beschriften und sie
+        # gleichzeitig aus der 300-m-Suche zu werfen. Die Form mit + 0,5 statt
+        # ROUND() laesst den Index auf pair(store_id, gap_m) in Ruhe.
         query = (
             "SELECT c.*, p.gap_m FROM pair p JOIN charger c ON c.id = p.charger_id"
-            " WHERE p.store_id = ? AND p.gap_m <= ?"
+            " WHERE p.store_id = ? AND p.gap_m < ? + 0.5"
         )
         parameters: list = [store_id, gap_m]
-        if only_enbw:
-            query += " AND c.is_enbw = 1"
+        wanted = [key for key in dict.fromkeys(networks) if key in NETWORKS]
+        if wanted:
+            query += f" AND c.network IN ({','.join('?' for _ in wanted)})"
+            parameters.extend(wanted)
+        if min_power_kw > 0:
+            query += " AND c.power_kw >= ?"
+            parameters.append(min_power_kw)
         query += " ORDER BY p.gap_m"
-        return [
-            {
-                "id": row["id"],
-                "lat": row["lat"],
-                "lon": row["lon"],
-                "operator": row["operator"],
-                "isEnbw": bool(row["is_enbw"]),
-                "powerKw": row["power_kw"],
-                "capacity": row["capacity"],
-                "fee": row["fee"],
-                "gapM": round(row["gap_m"]),
-            }
-            for row in self._connection.execute(query, parameters).fetchall()
-        ]
+        return [charger_payload(row) for row in self._connection.execute(query, parameters)]
 
     @staticmethod
     def _spot(store: sqlite3.Row, chargers: list[dict]) -> dict:
         return spot_payload(store, chargers)
+
+
+def charger_payload(row) -> dict:
+    """Eine Ladesaeule, wie sie an die App geht."""
+    return {
+        "id": row["id"],
+        "lat": row["lat"],
+        "lon": row["lon"],
+        "operator": row["operator"],
+        "network": row["network"],
+        "powerKw": row["power_kw"],
+        "capacity": row["capacity"],
+        "fee": row["fee"],
+        "gapM": round(row["gap_m"]),
+    }
 
 
 def spot_payload(store, chargers: list[dict]) -> dict:

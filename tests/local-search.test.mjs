@@ -36,7 +36,8 @@ const { localBackend, parseGpx, isAddress, isPlaceholder, columnAFromSheet, thin
 
 const DORTMUND = { lat: 51.5142, lon: 7.4653 };
 const STUTTGART = { lat: 48.7758, lon: 9.1829 };
-const params = { kinds: ['bk'], radiusKm: 25, corridorM: 3000, gapM: 300, onlyEnbw: true };
+const params = { kinds: ['bk'], radiusKm: 25, corridorM: 3000, gapM: 300,
+                 networks: ['enbw'], minPowerKw: 0 };
 
 // Eine gerade Linie reicht: geprueft wird die Auswahllogik, nicht der Router.
 function straightRoute(from, to, steps = 200) {
@@ -61,7 +62,7 @@ test('Umkreissuche liefert nur Treffer im Radius, sortiert nach Entfernung', { s
     assert.ok(spot.chargers.length > 0);
     for (const charger of spot.chargers) {
       assert.ok(charger.gapM <= params.gapM);
-      assert.equal(charger.isEnbw, true);
+      assert.equal(charger.network, 'enbw');
     }
   }
   const distances = result.spots.map((spot) => spot.distanceM);
@@ -73,9 +74,9 @@ test('Umkreissuche liefert nur Treffer im Radius, sortiert nach Entfernung', { s
   assert.ok(!fetched.includes('spots-vegan.json'), 'Zusatzteil ohne Not geladen');
 });
 
-test('Der EnBW-Filter kann nur weniger finden, nie mehr', { skip: !dataAvailable }, async () => {
-  const strict = await localBackend.radiusSearch(DORTMUND, { ...params, onlyEnbw: true });
-  const loose = await localBackend.radiusSearch(DORTMUND, { ...params, onlyEnbw: false });
+test('Eine Netzauswahl kann nur weniger finden, nie mehr', { skip: !dataAvailable }, async () => {
+  const strict = await localBackend.radiusSearch(DORTMUND, { ...params, networks: ['enbw'] });
+  const loose = await localBackend.radiusSearch(DORTMUND, { ...params, networks: [] });
   const looseIds = new Set(loose.spots.map((spot) => spot.id));
   assert.ok(strict.spots.length <= loose.spots.length);
   for (const spot of strict.spots) assert.ok(looseIds.has(spot.id), spot.id);
@@ -156,7 +157,7 @@ test('Ausduennen behaelt Anfang und Ende', () => {
 });
 
 test('Ketten sind einzeln waehlbar und kombinierbar', { skip: !dataAvailable }, async () => {
-  const wide = { ...params, radiusKm: 100, onlyEnbw: false };
+  const wide = { ...params, radiusKm: 100, networks: [] };
   const burgerKing = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk'] });
   const subway = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['subway'] });
   const both = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk', 'subway'] });
@@ -179,13 +180,13 @@ test('Burger King ist abwaehlbar, ohne Auswahl gibt es nichts', { skip: !dataAva
 
 test('Auch entlang der Route wirkt die Auswahl', { skip: !dataAvailable }, async () => {
   const route = straightRoute(DORTMUND, STUTTGART);
-  const subway = await localBackend.spotsAlongRoute(route, { ...params, kinds: ['subway'], onlyEnbw: false });
+  const subway = await localBackend.spotsAlongRoute(route, { ...params, kinds: ['subway'], networks: [] });
   assert.ok(subway.every((spot) => spot.brand === 'subway'));
 });
 
 test('Vegane Kategorien schliessen die Ketten ein, rein vegan ist eine Teilmenge',
   { skip: !dataAvailable }, async () => {
-    const wide = { ...params, radiusKm: 100, onlyEnbw: false };
+    const wide = { ...params, radiusKm: 100, networks: [] };
     const vegan = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['vegan'] });
     const veganOnly = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['vegan_only'] });
     const chains = await localBackend.radiusSearch(DORTMUND, { ...wide, kinds: ['bk', 'subway'] });
@@ -202,17 +203,46 @@ test('Vegane Kategorien schliessen die Ketten ein, rein vegan ist eine Teilmenge
   });
 
 test('Kombinierte Auswahl liefert jedes Lokal genau einmal', { skip: !dataAvailable }, async () => {
-  const wide = { ...params, radiusKm: 100, onlyEnbw: false, kinds: ['bk', 'vegan', 'vegan_only'] };
+  const wide = { ...params, radiusKm: 100, networks: [], kinds: ['bk', 'vegan', 'vegan_only'] };
   const result = await localBackend.radiusSearch(DORTMUND, wide);
   assert.equal(new Set(result.spots.map((spot) => spot.id)).size, result.spots.length);
 });
 
 test('Der Zusatzteil wird genau einmal geladen und dann wiederverwendet',
   { skip: !dataAvailable }, async () => {
-    const wide = { ...params, radiusKm: 50, onlyEnbw: false, kinds: ['vegan'] };
+    const wide = { ...params, radiusKm: 50, networks: [], kinds: ['vegan'] };
     await localBackend.radiusSearch(DORTMUND, wide);
     await localBackend.radiusSearch(STUTTGART, wide);
     const count = (name) => fetched.filter((item) => item === name).length;
     assert.equal(count('spots.json'), 1);
     assert.equal(count('spots-vegan.json'), 1);
   });
+
+test('Netzauswahl und Mindestleistung wirken zusammen', { skip: !dataAvailable }, async () => {
+  const wide = { ...params, radiusKm: 100, kinds: ['bk', 'subway'] };
+  const alle = await localBackend.radiusSearch(DORTMUND, { ...wide, networks: [] });
+  const lidl = await localBackend.radiusSearch(DORTMUND, { ...wide, networks: ['lidl'] });
+  const kaufland = await localBackend.radiusSearch(DORTMUND, { ...wide, networks: ['kaufland'] });
+  const beide = await localBackend.radiusSearch(DORTMUND, { ...wide, networks: ['lidl', 'kaufland'] });
+
+  assert.ok(lidl.spots.length > 0, 'keine Lidl-Säule im 100-km-Umkreis');
+  assert.ok(lidl.spots.every((s) => s.chargers.every((c) => c.network === 'lidl')));
+  assert.ok(kaufland.spots.every((s) => s.chargers.every((c) => c.network === 'kaufland')));
+
+  // Leere Netzliste heisst alle Netze, nicht keine. Das ist bewusst anders
+  // als bei den Kategorien, wo leer "nichts gesucht" bedeutet.
+  assert.ok(alle.spots.length >= beide.spots.length);
+  const alleIds = new Set(alle.spots.map((s) => s.id));
+  for (const spot of beide.spots) assert.ok(alleIds.has(spot.id), spot.id);
+
+  // Die Vereinigung enthaelt beide Einzelauswahlen, ohne Doppelte.
+  const beideIds = new Set(beide.spots.map((s) => s.id));
+  for (const spot of [...lidl.spots, ...kaufland.spots]) assert.ok(beideIds.has(spot.id), spot.id);
+  assert.equal(beideIds.size, beide.spots.length);
+
+  // Die Mindestleistung schliesst Saeulen ohne Leistungsangabe aus.
+  const schnell = await localBackend.radiusSearch(DORTMUND, { ...wide, networks: [], minPowerKw: 50 });
+  assert.ok(schnell.spots.length > 0);
+  assert.ok(schnell.spots.length < alle.spots.length);
+  assert.ok(schnell.spots.every((s) => s.chargers.every((c) => c.powerKw >= 50)));
+});

@@ -67,9 +67,50 @@ KINDS: dict[str, Kind] = {
 # Burger King ist die Voreinstellung, alles andere waehlt man dazu.
 DEFAULT_KINDS = ("bk",)
 
-# EnBW als Betreiber: die Schreibweisen in OSM sind uneinheitlich.
-_ENBW_KEYS = ("operator", "network", "brand", "owner", "name", "operator:short")
-_ENBW_WIKIDATA = {"Q321820", "Q1345004"}
+# Wo an einer Ladesaeule der Betreiber stehen kann. Die Schreibweisen in OSM
+# sind uneinheitlich: "EnBW", "EnBW mobility+ AG und Co.KG", "Lidl Stiftung
+# GmbH & Co. KG". Deshalb Wikidata als Anker und Textsuche als Auffangnetz.
+_OPERATOR_KEYS = ("operator", "network", "brand", "owner", "name", "operator:short")
+_WIKIDATA_KEYS = ("operator:wikidata", "network:wikidata", "brand:wikidata")
+
+
+@dataclass(frozen=True)
+class Network:
+    """Ein Ladenetz, wie es in OSM auffindbar ist."""
+
+    key: str
+    label: str
+    wikidata: frozenset[str]
+    needles: tuple[str, ...]
+
+
+# Die Wikidata-Ids sind am Datenbestand geprueft, nicht aus dem Kopf: Q644304
+# steht an 919 Saeulen, Q151954 an 225, Q685967 an 102. Der vorherige
+# EnBW-Anker Q321820 kam null mal vor und war damit wirkungslos; gerettet hat
+# das nur die Namenssuche.
+NETWORKS: dict[str, Network] = {
+    "enbw": Network("enbw", "EnBW", frozenset({"Q644304"}), ("enbw", "en bw")),
+    "lidl": Network("lidl", "Lidl", frozenset({"Q151954"}), ("lidl",)),
+    "kaufland": Network("kaufland", "Kaufland", frozenset({"Q685967"}), ("kaufland",)),
+}
+
+# Ab hier gilt eine Saeule als Schnelllader. 50 kW ist die uebliche Grenze
+# zwischen AC-Laden und Gleichstrom-Schnellladen.
+FAST_CHARGER_KW = 50.0
+
+# Die Leistungsstufen, nach denen die App filtern kann: keine Grenze oder
+# Schnelllader. Diese Liste ist nicht bloss Dekoration, an ihr haengt die
+# Kuerzung der Saeulenlisten im statischen Export (siehe export_static). Wer
+# hier eine Stufe ergaenzt, muss sie dort mitnehmen, sonst faengt der Export
+# an, Lokale zu verlieren. Der Test dazu heisst
+# test_capped_export_answers_like_the_full_list.
+POWER_STEPS: tuple[float, ...] = (0.0, FAST_CHARGER_KW)
+
+
+def power_step(power_kw: float | None) -> int:
+    """Hoechste Leistungsstufe, die diese Saeule erfuellt, als Index."""
+    value = power_kw or 0.0
+    return max(index for index, step in enumerate(POWER_STEPS) if value >= step)
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -98,18 +139,35 @@ def box_around(lat: float, lon: float, meters: float) -> tuple[float, float, flo
     return lat - pad_lat, lon - pad_lon, lat + pad_lat, lon + pad_lon
 
 
+def matches_network(tags: dict, network: Network) -> bool:
+    if any(key.lower().startswith(f"ref:{network.key}") for key in tags):
+        return True
+    if any(tags.get(key) in network.wikidata for key in _WIKIDATA_KEYS):
+        return True
+    haystack = " ".join(filter(None, (tags.get(key) for key in _OPERATOR_KEYS))).lower()
+    return any(needle in haystack for needle in network.needles)
+
+
+def network_of(tags: dict) -> str | None:
+    """Schluessel des ersten passenden Netzes, oder None fuer alle anderen."""
+    for network in NETWORKS.values():
+        if matches_network(tags, network):
+            return network.key
+    return None
+
+
 def is_enbw(tags: dict) -> bool:
-    if any(key.lower().startswith("ref:enbw") for key in tags):
-        return True
-    if tags.get("operator:wikidata") in _ENBW_WIKIDATA:
-        return True
-    if tags.get("network:wikidata") in _ENBW_WIKIDATA:
-        return True
-    for key in _ENBW_KEYS:
-        value = (tags.get(key) or "").lower()
-        if "enbw" in value or "en bw" in value:
-            return True
-    return False
+    return matches_network(tags, NETWORKS["enbw"])
+
+
+def parse_networks(raw: str | None) -> list[Network]:
+    """Kommaliste von Netzschluesseln. Leer heisst: alle Netze, kein Filter."""
+    keys = [key.strip().lower() for key in (raw or "").split(",") if key.strip()]
+    chosen: list[Network] = []
+    for key in keys:
+        if key in NETWORKS and NETWORKS[key] not in chosen:
+            chosen.append(NETWORKS[key])
+    return chosen
 
 
 def matches_brand(tags: dict, brand: Brand) -> bool:

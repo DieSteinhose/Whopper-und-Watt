@@ -28,7 +28,8 @@ export const serverBackend = {
       lon: center.lon,
       radius_km: params.radiusKm,
       gap_m: params.gapM,
-      only_enbw: params.onlyEnbw ? '1' : '0',
+      networks: (params.networks ?? []).join(','),
+      min_power_kw: params.minPowerKw ?? 0,
       kinds: (params.kinds ?? []).join(','),
     });
     return api(`api/spots?${query}`);
@@ -44,7 +45,8 @@ export const serverBackend = {
         label: request.label,
         corridorM: params.corridorM,
         gapM: params.gapM,
-        onlyEnbw: params.onlyEnbw,
+        networks: params.networks,
+        minPowerKw: params.minPowerKw,
         kinds: params.kinds,
       }),
     });

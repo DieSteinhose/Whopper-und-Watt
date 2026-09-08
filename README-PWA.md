@@ -65,6 +65,55 @@ dieses Tag. Ohne Wikidata-Treffer wird ein passender Name nur bei `amenity=fast_
 `restaurant` oder `cafe` geglaubt, sonst wäre jeder U-Bahn-Zugang namens "Subway" eine
 Filiale.
 
+## Welche Ladesäule
+
+Ein zweiter Satz Knöpfe, unabhängig von der Auswahl oben. Hier heißt **nichts angehakt: alle
+Netze**, anders als bei den Kategorien, wo nichts angehakt nichts gesucht bedeutet. Das steht
+deshalb in der Beschriftung der Zeile, statt es erraten zu lassen.
+
+| Knopf | Was drin ist | Säulen im Bestand |
+|---|---|---:|
+| **EnBW** (Voreinstellung) | `operator:wikidata=Q644304` oder "EnBW" im Betreiber | 1.221 |
+| **Lidl** | `operator:wikidata=Q151954` oder "Lidl" im Betreiber | 289 |
+| **Kaufland** | `operator:wikidata=Q685967` oder "Kaufland" im Betreiber | 139 |
+| **ab 50 kW** | `power_kw >= 50` aus den OSM-Leistungstags | 3.509 |
+
+Die Wikidata-Ids sind am Datenbestand geprüft, nicht aus dem Kopf. Dabei kam heraus, dass der
+bisherige EnBW-Anker `Q321820` deutschlandweit **null mal** vorkommt und damit wirkungslos war;
+gerettet hat das nur die Namenssuche. Richtig ist `Q644304`, an 919 Säulen.
+
+**Die Leistungsangabe fehlt oft.** Von 25.456 Säulen im Bestand haben 9.188 überhaupt eine
+Leistung in OSM, also gut ein Drittel. "ab 50 kW" blendet alles ohne Angabe aus, und das steht
+im Tooltip des Knopfs. Eine Säule ohne Tag ist nicht langsam, sie ist unbekannt.
+
+## Ad-hoc-Preise: nicht aus OpenStreetMap
+
+Ein Filter "unter 50 ct" wäre über OSM-Daten nicht ehrlich zu bauen, gemessen am 08.09.2026:
+
+| | Anzahl | Anteil |
+|---|---:|---:|
+| Ladesäulen in Deutschland | 58.178 | |
+| mit `fee` (nur ja/nein) | 28.174 | 48 % |
+| **mit `charge` (dem Preisfeld)** | **914** | **1,6 %** |
+| mit `socket:*:charge` | 0 | |
+
+Und die 914 Werte sind freier Text in einem Dutzend Formaten. Aus dem eigenen Bestand:
+`0.38 EUR/kWh`, `0,55 €/kWh`, `0.23 EUR/kWh + 0.04 EUR/min`, `75ct/kWh Ad-hoc`,
+`0,39€/kWh mit Blockiergebühr`, `1€/1H`. Manche sind Zeittarife, manche enthalten
+Blockiergebühren, manche sind gar keine Ad-hoc-Preise. Dazu kommt das Grundproblem: Tarife
+ändern sich, OSM wird dabei nicht mitgepflegt. Ein Preis von 2023 ist schlechter als kein Preis.
+
+Wer echte Ad-hoc-Preise will, braucht eine Quelle, die genau dafür gebaut ist. Die einzige mit
+brauchbarer Abdeckung in Europa ist [Chargeprice](https://www.chargeprice.net/de/charging-intelligence-daten/):
+eine [API](https://chargeprice.github.io/chargeprice-api-docs/) mit Ad-hoc, Direktzahlung,
+Kreditkarte, Roaming und Tageszeittarifen, mehrmals wöchentlich aktualisiert. Kostenloser
+Demo-Zugang auf Anfrage, allerdings mit eingeschränkten Daten und ausdrücklich ohne
+kommerzielle Nutzung. Das Bundesnetzagentur-Ladesäulenregister hat Standorte und Leistung, aber
+keine Preise; Open Charge Map hat ein Freitextfeld mit ähnlich dünner Abdeckung wie OSM.
+
+Der Lidl- und der Kaufland-Knopf sind der ehrliche Ersatz: statt einen Preis zu behaupten, den
+die Daten nicht hergeben, wird nach den Betreibern gefiltert, die günstig sind.
+
 ## Warum überhaupt ein Server
 
 Die Android-App fragt Overpass zur Laufzeit. Das war der Flaschenhals, gemessen über mehrere
@@ -179,7 +228,7 @@ ausgegeben.
 | Endpunkt | Zweck |
 |---|---|
 | `GET /api/meta` | Bestand und Stand der Datenbank |
-| `GET /api/spots?lat&lon&radius_km&gap_m&only_enbw&kinds` | Umkreissuche, `kinds` als Kommaliste (`bk`, `subway`, `vegan`, `vegan_only`) |
+| `GET /api/spots?lat&lon&radius_km&gap_m&kinds&networks&min_power_kw` | Umkreissuche. `kinds` als Kommaliste (`bk`, `subway`, `vegan`, `vegan_only`), `networks` als Kommaliste (`enbw`, `lidl`, `kaufland`), leer heißt alle |
 | `POST /api/route-spots` | Route aus Adressen oder Wegpunkten, plus Treffer im Korridor |
 | `GET /api/geocode?q=` | Ortssuche über Nominatim, mit Cache und 1 Anfrage pro Sekunde |
 | `POST /api/plan?name=` | GPX oder ABRP-Excel hochladen, ergibt Wegpunkte |
@@ -273,7 +322,7 @@ Nominatim und OSRM.
 | Datei | Inhalt | roh | gepackt | wann geladen |
 |---|---:|---:|---:|---|
 | `data/spots.json` | 1.651 Kettenfilialen | 1,1 MB | 194 KB | immer, beim Start |
-| `data/spots-vegan.json` | 12.655 vegane Lokale | 8,9 MB | 1,56 MB | erst beim Anhaken |
+| `data/spots-vegan.json` | 12.655 vegane Lokale | 8,7 MB | 1,52 MB | erst beim Anhaken |
 
 In einer ungekürzten Datei wären das 5,5 MB gepackt und 38 MB entpackt, die jede Installation
 beim Start herunterladen und durch `JSON.parse` schicken müsste, auch für eine Suche nach
@@ -290,10 +339,18 @@ nächsten EnBW- und die drei nächsten Fremdsäulen: 5,21 → 1,56 MB gepackt.
 
 Das kostet **keine** Treffer, denn die App braucht je Filterstellung nur zwei Dinge, und beide
 bleiben exakt: *gibt es hier überhaupt eine passende Säule bis X Meter* und *welche ist die
-nächste*. Die nächste EnBW-Säule ist die nächste bei jedem Abstand, der sie einschließt.
-Gekürzt wird je Klasse und nicht über beide zusammen, sonst könnte der EnBW-Filter ein Lokal
-verlieren, an dem zwar eine EnBW-Säule liegt, aber vier fremde näher dran sind. Im Browser
-gegengeprüft: dieselben 5, 95 und 1.934 Treffer wie mit der ungekürzten Datei.
+nächste*. Die nächste Lidl-Säule ist die nächste bei jedem Abstand, der sie einschließt.
+
+Eine Klasse ist ein Paar aus **Netz und Leistungsstufe** (`geo.POWER_STEPS`), denn genau danach
+lässt sich filtern. Beim Bauen habe ich zuerst nur nach Netz und "schneller als 50 kW"
+klassiert, und eine Prüfung mit Schwelle 150 kW verlor prompt 47 Lokale: deren 150-kW-Säule
+fiel raus, weil zwei 50-kW-Säulen näher dran waren. Wer einen Knopf "ab 150 kW" ergänzt, muss
+die Stufe in `POWER_STEPS` mitnehmen; der Test `test_capped_export_answers_like_the_full_list`
+schlägt sonst fehl.
+
+Gegengeprüft an echten Daten: **48 Kombinationen aus Netzauswahl, Leistungsstufe und Abstand,
+null Abweichungen** zwischen gekürzter Datei und voller Datenbank. Und im Browser gegen den
+laufenden Server: **60 Kombinationen, null Abweichungen**.
 
 Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist `chargersCapped` mit,
 und die App schreibt dann "3+" statt "3". Mit Server steht dort weiterhin die exakte Zahl, denn
@@ -378,8 +435,12 @@ ABRP-Excel-Exports und allen 54 unterschiedlichen `opening_hours`-Angaben aus de
   und sie kann es mit dieser Datenquelle auch nicht sein.
 - **`diet:vegan=no` wird bei den Ketten bewusst ignoriert**, siehe oben. Bei allen anderen
   Lokalen wird es respektiert, dort ist es die beste verfügbare Aussage.
-- **"Nur EnBW" heißt: in OSM als EnBW getaggt.** Nicht: dort mit EnBW-Tarif ladbar. Roaming an
-  Fremdsäulen ist damit nicht abgedeckt.
+- **Eine Netzauswahl heißt: in OSM so getaggt.** Nicht: dort mit dem Tarif dieses Anbieters
+  ladbar. Roaming an Fremdsäulen ist damit nicht abgedeckt.
+- **"ab 50 kW" kennt nur, was eine Leistungsangabe hat**, und das ist gut ein Drittel der
+  Säulen. Eine Säule ohne Tag ist nicht langsam, sie ist unbekannt, und sie fällt raus.
+- **Preise gibt es hier nicht**, siehe oben: OSM hat sie an 1,6 Prozent der Säulen, als freien
+  Text, ohne Pflege bei Tarifwechseln.
 - **Routing und Geocoding hängen weiter an öffentlichen Diensten** (OSRM-Demoserver, Nominatim).
   Nur die eigentliche Suche ist davon unabhängig. Für echten Betrieb gehören dort eigene
   Instanzen hin.
