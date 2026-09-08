@@ -62,6 +62,7 @@ from geo import (  # noqa: E402
     matches_brand,
     max_power_kw,
 )
+from schema import connect, migrate  # noqa: E402,F401  (connect wird hier benutzt)
 
 # Reihenfolge ist gemessen: die franzoesische Instanz beantwortete einen Block aus
 # 20 Boxen in 5 Sekunden, waehrend kumi und overpass-api.de denselben Block mit
@@ -88,115 +89,6 @@ OVERPASS_WORKERS = 2
 # Deutschland mit etwas Rand. Bewusst grosszuegig: eine Filiale kurz hinter der
 # Grenze ist fuer die Frage genauso brauchbar wie eine kurz davor.
 GERMANY_BBOX = "47.20,5.80,55.10,15.10"
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS store (
-    id TEXT PRIMARY KEY,
-    brand TEXT,
-    amenity TEXT,
-    vegan INTEGER NOT NULL DEFAULT 0,
-    vegan_only INTEGER NOT NULL DEFAULT 0,
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    name TEXT,
-    address TEXT,
-    opening_hours TEXT,
-    tags TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS store_by_brand ON store(brand);
-
-CREATE TABLE IF NOT EXISTS charger (
-    id TEXT PRIMARY KEY,
-    lat REAL NOT NULL,
-    lon REAL NOT NULL,
-    operator TEXT,
-    is_enbw INTEGER NOT NULL,
-    network TEXT,
-    power_kw REAL,
-    capacity TEXT,
-    fee TEXT,
-    tags TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS pair (
-    store_id TEXT NOT NULL,
-    charger_id TEXT NOT NULL,
-    gap_m REAL NOT NULL,
-    PRIMARY KEY (store_id, charger_id)
-);
-CREATE INDEX IF NOT EXISTS pair_by_store ON pair(store_id, gap_m);
-
--- Fortschritt des Ladesaeulen-Schritts, damit ein Abbruch nichts kostet.
--- Der Schluessel enthaelt die Rastergroesse, damit ein Lauf mit anderem Raster
--- nicht faelschlich die alten Zellen als erledigt liest.
-CREATE TABLE IF NOT EXISTS ingest_cell (cell TEXT PRIMARY KEY, done_at TEXT NOT NULL);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS store_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
-"""
-
-# Spalten, die spaeter dazugekommen sind. Eine bestehende Datenbank soll nicht
-# weggeworfen werden muessen, nur weil eine Kategorie dazugekommen ist.
-ADDED_STORE_COLUMNS = {
-    "amenity": "TEXT",
-    "vegan": "INTEGER NOT NULL DEFAULT 0",
-    "vegan_only": "INTEGER NOT NULL DEFAULT 0",
-}
-ADDED_CHARGER_COLUMNS = {"network": "TEXT"}
-
-# Erst nach der Migration, denn ein Index auf einer Spalte, die es in einer
-# aelteren Datenbank noch nicht gibt, laesst sich nicht anlegen.
-SCHEMA_INDEXES = """
-CREATE INDEX IF NOT EXISTS store_by_vegan ON store(vegan);
-CREATE INDEX IF NOT EXISTS store_by_vegan_only ON store(vegan_only);
-CREATE INDEX IF NOT EXISTS charger_by_network ON charger(network);
-CREATE INDEX IF NOT EXISTS charger_by_power ON charger(power_kw);
-"""
-
-
-def connect(path: Path) -> sqlite3.Connection:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    connection.executescript(SCHEMA)
-    migrate(connection)
-    connection.executescript(SCHEMA_INDEXES)
-    return connection
-
-
-def migrate(connection: sqlite3.Connection) -> list[str]:
-    """Fehlende Spalten nachziehen. Gibt zurueck, was ergaenzt wurde."""
-    added = []
-    for table, columns in (("store", ADDED_STORE_COLUMNS), ("charger", ADDED_CHARGER_COLUMNS)):
-        present = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})")}
-        for column, definition in columns.items():
-            if column not in present:
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                added.append(f"{table}.{column}")
-    if added:
-        connection.commit()
-    if "charger.network" in added:
-        backfill_networks(connection)
-    return added
-
-
-def backfill_networks(connection: sqlite3.Connection) -> int:
-    """Netz aus den gespeicherten Tags nachtragen, ohne neu abzufragen.
-
-    Die Tags liegen ohnehin in der Datenbank. Eine bestehende Datenbank muss
-    also nicht wegen einer neuen Spalte fuenf Minuten Overpass kosten.
-    """
-    rows = [
-        (network_of(json.loads(row["tags"] or "{}")), row["id"])
-        for row in connection.execute("SELECT id, tags FROM charger")
-    ]
-    connection.executemany("UPDATE charger SET network = ? WHERE id = ?", rows)
-    connection.commit()
-    filled = sum(1 for network, _ in rows if network)
-    print(f"  Netz fuer {filled} von {len(rows)} Saeulen aus den Tags nachgetragen", flush=True)
-    return filled
-
 
 def overpass(query: str, timeout: int = 600, attempts: int = 4) -> dict:
     """Fragt Overpass ab und wechselt bei Fehlern den Endpunkt."""

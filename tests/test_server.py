@@ -580,6 +580,110 @@ class NetworkExposureTest(unittest.TestCase):
             plan.parse_xlsx(buffer.getvalue())
 
 
+class MigrationTest(unittest.TestCase):
+    """Eine Datenbank aus einer aelteren Version muss auf jedem Weg tragen."""
+
+    # So sah die Datenbank vor den veganen Kategorien und den Netzen aus.
+    ALTES_SCHEMA = """
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE store (
+        id TEXT PRIMARY KEY, brand TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
+        name TEXT, address TEXT, opening_hours TEXT, tags TEXT NOT NULL
+    );
+    CREATE TABLE charger (
+        id TEXT PRIMARY KEY, lat REAL NOT NULL, lon REAL NOT NULL, operator TEXT,
+        is_enbw INTEGER NOT NULL, power_kw REAL, capacity TEXT, fee TEXT, tags TEXT NOT NULL
+    );
+    CREATE TABLE pair (
+        store_id TEXT NOT NULL, charger_id TEXT NOT NULL, gap_m REAL NOT NULL,
+        PRIMARY KEY (store_id, charger_id)
+    );
+    CREATE VIRTUAL TABLE store_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
+    """
+
+    def _alte_datenbank(self, directory: str) -> Path:
+        path = Path(directory) / "alt.sqlite"
+        connection = sqlite3.connect(path)
+        connection.executescript(self.ALTES_SCHEMA)
+        connection.execute(
+            "INSERT INTO store (id, brand, lat, lon, name, address, opening_hours, tags)"
+            " VALUES ('node/1', 'bk', ?, ?, 'Burger King', NULL, '24/7', '{}')",
+            BK_ECHTERDINGEN,
+        )
+        connection.execute(
+            "INSERT INTO charger (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
+            " VALUES ('node/10', 48.69235, 9.1946, 'EnBW', 1, 150.0, '4', 'yes',"
+            " '{\"operator\": \"EnBW\"}')"
+        )
+        connection.execute(
+            "INSERT INTO pair (store_id, charger_id, gap_m) VALUES ('node/1', 'node/10', 50.0)"
+        )
+        connection.execute(
+            "INSERT INTO store_rtree (rowid, min_lat, max_lat, min_lon, max_lon)"
+            " SELECT rowid, lat, lat, lon, lon FROM store"
+        )
+        connection.commit()
+        connection.close()
+        return path
+
+    def test_old_database_is_migrated_on_every_path(self):
+        """Auch die lesenden Wege ziehen nach, nicht nur der Ingest.
+
+        Genau das fehlte: der Workflow holte eine Datenbank aus dem
+        Actions-Cache, uebersprang den Ingest, weil sich am Datenbestand
+        nichts geaendert hatte, und der Export lief in
+        "sqlite3.OperationalError: no such column: c.network".
+        """
+        import export_static
+
+        # Der lesende Weg des Servers.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._alte_datenbank(directory)
+            database = SpotDatabase(path)
+            spots = database.spots_near(
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, networks=["enbw"], kinds=["bk"]
+            )
+            self.assertEqual([spot["id"] for spot in spots], ["node/1"])
+            # Das Netz wurde aus den gespeicherten Tags nachgetragen.
+            self.assertEqual(spots[0]["chargers"][0]["network"], "enbw")
+
+        # Der Weg des statischen Exports.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._alte_datenbank(directory)
+            payload = export_static.export(path, Path(directory) / "spots.json")
+            self.assertEqual(len(payload["spots"]), 1)
+            self.assertEqual(payload["spots"][0]["chargers"][0]["network"], "enbw")
+
+        # Und der schreibende Weg des Ingests.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._alte_datenbank(directory)
+            connection = ingest.connect(path)
+            spalten = {row["name"] for row in connection.execute("PRAGMA table_info(charger)")}
+            self.assertIn("network", spalten)
+            connection.close()
+
+    def test_schema_and_migration_stay_in_step(self):
+        """Jede nachtraegliche Spalte muss auch im frischen Schema stehen.
+
+        Sonst gibt es zwei Datenbanken mit unterschiedlichen Spalten, je
+        nachdem ob sie neu gebaut oder migriert wurde.
+        """
+        import schema
+
+        with tempfile.TemporaryDirectory() as directory:
+            connection = schema.connect(Path(directory) / "neu.sqlite")
+            for tabelle, spalten in (
+                ("store", schema.ADDED_STORE_COLUMNS),
+                ("charger", schema.ADDED_CHARGER_COLUMNS),
+            ):
+                vorhanden = {
+                    row["name"] for row in connection.execute(f"PRAGMA table_info({tabelle})")
+                }
+                for spalte in spalten:
+                    self.assertIn(spalte, vorhanden, f"{tabelle}.{spalte} fehlt im frischen Schema")
+            connection.close()
+
+
 class IngestTest(unittest.TestCase):
     def test_grid_covers_the_bounding_box_without_gaps(self):
         cells = ingest.grid_cells("47.20,5.80,55.10,15.10", 4)

@@ -12,6 +12,7 @@ import sqlite3
 from pathlib import Path
 from typing import Sequence
 
+from schema import connect as open_database
 from geo import (
     AMENITY_LABELS,
     BRANDS,
@@ -54,12 +55,10 @@ def kind_filter(kinds: Sequence[str]) -> str:
 class SpotDatabase:
     def __init__(self, path: Path):
         self.path = Path(path)
-        if not self.path.exists():
-            raise FileNotFoundError(
-                f"{self.path} fehlt. Erst 'python3 server/ingest.py' laufen lassen."
-            )
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
-        self._connection.row_factory = sqlite3.Row
+        # Auch der lesende Weg migriert. Eine Datenbank aus dem Actions-Cache
+        # ist sonst genau so alt wie der Lauf, der sie gebaut hat, und der
+        # Server faellt beim ersten Zugriff auf eine neue Spalte um.
+        self._connection = open_database(self.path, create=False, check_same_thread=False)
 
     def meta(self) -> dict:
         rows = self._connection.execute("SELECT key, value FROM meta").fetchall()

@@ -213,8 +213,17 @@ Overpass-Endpunkte ist gemessen, nicht geraten: `overpass.openstreetmap.fr` bean
 Block aus 20 Boxen in 5 Sekunden, während `kumi.systems` und `overpass-api.de` denselben Block
 mit HTTP 504 abwiesen.
 
-Eine bestehende Datenbank aus einer älteren Version wird beim Öffnen migriert (`amenity`,
-`vegan`, `vegan_only` werden per `ALTER TABLE` ergänzt), sie muss nicht weggeworfen werden.
+Eine bestehende Datenbank aus einer älteren Version wird **beim Öffnen** migriert, auf jedem
+Weg: Ingest, Server und statischer Export gehen alle durch `server/schema.py`. Fehlende Spalten
+kommen per `ALTER TABLE` dazu, das Netz wird aus den gespeicherten Tags nachgetragen, ohne
+einen einzigen Overpass-Aufruf.
+
+Dass das Schema eine eigene Datei ist, hat einen Grund. Solange die Migration nur im Ingest
+lag, ging der nächtliche Lauf so aus: Datenbank aus dem Actions-Cache geholt, Ingest
+übersprungen weil es ein Commit-Lauf war, und der Export brach ab mit
+`sqlite3.OperationalError: no such column: c.network`. Wer eine Spalte ergänzt, trägt sie in
+`SCHEMA` **und** in `ADDED_*_COLUMNS` ein; `test_schema_and_migration_stay_in_step` prüft, dass
+beide Seiten zusammenpassen.
 
 **Die Datenbank liegt nicht im Repository.** Sie ist rund 50 MB groß und ändert sich bei jedem
 Ingest komplett; als Binärdatei in der Git-Historie wäre sie am falschen Platz. Der Workflow

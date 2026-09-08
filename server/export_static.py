@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import charger_payload, spot_payload  # noqa: E402
+from schema import connect as open_database  # noqa: E402
 from geo import POWER_STEPS, power_step  # noqa: E402
 
 # Der Zusatzteil heisst wie die Hauptdatei, nur mit diesem Anhaengsel.
@@ -118,8 +119,10 @@ def _write(path: Path, payload: dict) -> tuple[int, int]:
 
 def export(db_path: Path, out_path: Path) -> dict:
     """Schreibt beide Teile und gibt den vollstaendigen Bestand zurueck."""
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
+    # Ueber schema.connect, damit auch dieser Weg eine aeltere Datenbank
+    # nachzieht. Genau hier ist der Workflow gescheitert: Datenbank aus dem
+    # Cache, Ingest uebersprungen, "no such column: c.network".
+    connection = open_database(db_path, create=False)
     chargers = _chargers_by_store(connection)
 
     parts: dict[str, list[dict]] = {"base": [], "vegan": []}
