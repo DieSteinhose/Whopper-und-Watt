@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from db import SpotDatabase  # noqa: E402
 from geo import (  # noqa: E402
     DEFAULT_KINDS,
+    CHEAP_PRICE_EUR,
     FAST_CHARGER_KW,
     KINDS,
     NETWORKS,
@@ -49,6 +50,7 @@ MAX_RADIUS_M = 200_000
 MAX_CORRIDOR_M = 20_000
 MAX_GAP_M = 2_000
 MAX_POWER_KW = 1_000
+MAX_PRICE_EUR = 10.0
 
 # Dateien, die sich nie aendern, duerfen lange im Browser bleiben.
 LONG_CACHE = ("/vendor/", "/icons/")
@@ -185,6 +187,7 @@ class Handler(BaseHTTPRequestHandler):
             {"key": network.key, "label": network.label} for network in NETWORKS.values()
         ]
         meta["fastChargerKw"] = FAST_CHARGER_KW
+        meta["cheapPriceEur"] = CHEAP_PRICE_EUR
         meta["ok"] = True
         return meta
 
@@ -195,12 +198,13 @@ class Handler(BaseHTTPRequestHandler):
         gap_m = min(_number(query, "gap_m", default=300), MAX_GAP_M)
         networks = parse_networks((query.get("networks") or [None])[0])
         min_power_kw = min(_number(query, "min_power_kw", default=0), MAX_POWER_KW)
+        max_price_kwh = min(_number(query, "max_price_kwh", default=0), MAX_PRICE_EUR)
         kinds = parse_kinds((query.get("kinds") or [None])[0])
 
         keys = [kind.key for kind in kinds]
         network_keys = [network.key for network in networks]
         spots = self.database.spots_near(
-            lat, lon, radius_m, gap_m, network_keys, min_power_kw, keys
+            lat, lon, radius_m, gap_m, network_keys, min_power_kw, keys, max_price_kwh
         )
         return {
             "mode": "radius",
@@ -209,6 +213,7 @@ class Handler(BaseHTTPRequestHandler):
             "kinds": keys,
             "networks": network_keys,
             "minPowerKw": min_power_kw,
+            "maxPriceKwh": max_price_kwh,
             "spots": spots,
             "queryMs": round((time.time() - started) * 1000, 1),
         }
@@ -227,6 +232,7 @@ class Handler(BaseHTTPRequestHandler):
         gap_m = min(float(body.get("gapM", 300)), MAX_GAP_M)
         networks = parse_networks(",".join(body.get("networks") or []))
         min_power_kw = min(float(body.get("minPowerKw", 0)), MAX_POWER_KW)
+        max_price_kwh = min(float(body.get("maxPriceKwh", 0)), MAX_PRICE_EUR)
         kinds = parse_kinds(",".join(body.get("kinds") or []))
 
         waypoints, label = self._waypoints(body)
@@ -239,12 +245,14 @@ class Handler(BaseHTTPRequestHandler):
             networks=[network.key for network in networks],
             min_power_kw=min_power_kw,
             kinds=[kind.key for kind in kinds],
+            max_price_kwh=max_price_kwh,
         )
         return {
             "mode": "route",
             "kinds": [kind.key for kind in kinds],
             "networks": [network.key for network in networks],
             "minPowerKw": min_power_kw,
+            "maxPriceKwh": max_price_kwh,
             "route": {
                 "polyline": computed["polyline"],
                 "distanceM": computed["distanceM"],

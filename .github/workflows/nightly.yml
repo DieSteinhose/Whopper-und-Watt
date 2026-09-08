@@ -88,9 +88,16 @@ jobs:
         continue-on-error: true
         run: python3 server/ingest.py --db fresh.sqlite
 
+      # Der Ingest baut nach fresh.sqlite, also in eine leere Datenbank. Die
+      # AFIR-Zuordnung darf dabei nicht verlorengehen: sie wird gespeichert,
+      # damit der Preis nicht jede Nacht auf eine andere Saeule im selben
+      # Ladepark springt, und ein taegliches Vergessen waere genau das.
+      # Uebernommen wird nur, was noch eine Saeule hat.
       - name: Frischen Stand uebernehmen
         if: steps.ingest.outcome == 'success'
-        run: mv fresh.sqlite server/data/whopper.sqlite
+        run: |
+          python3 server/prices.py --db fresh.sqlite --von server/data/whopper.sqlite --report
+          mv fresh.sqlite server/data/whopper.sqlite
 
       - name: Frischen Stand in den Cache legen
         if: steps.ingest.outcome == 'success'
@@ -107,6 +114,48 @@ jobs:
             exit 1
           fi
           echo "::warning::Es bleibt beim Stand aus dem Cache."
+
+      # Ad-hoc-Preise nach AFIR Artikel 20, ueber die Mobilithek. Optional:
+      # ohne die Variable AFIR_FEEDS passiert hier gar nichts, und die App
+      # blendet den Preisknopf dann aus. Zugang muss man selbst einrichten,
+      # kostenfrei, aber mit Registrierung und Abonnement:
+      #
+      #   AFIR_FEEDS         (Variable) URLs der abonnierten Datenangebote,
+      #                      eine je Zeile. Tabelle und Status, beides.
+      #   AFIR_CLIENT_CERT   (Secret, optional) Client-Zertifikat als PEM
+      #   AFIR_CLIENT_KEY    (Secret, optional) zugehoeriger Schluessel als PEM
+      #
+      # Die Mobilithek authentifiziert Abrufe ueber Client-Zertifikate; ohne
+      # die beiden Secrets geht nur, was ohne Anmeldung erreichbar ist.
+      - name: Ad-hoc-Preise holen
+        id: preise
+        if: vars.AFIR_FEEDS != ''
+        continue-on-error: true
+        env:
+          FEEDS: ${{ vars.AFIR_FEEDS }}
+          CERT: ${{ secrets.AFIR_CLIENT_CERT }}
+          KEY: ${{ secrets.AFIR_CLIENT_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p afir
+          AUTH=()
+          if [ -n "${CERT}" ] && [ -n "${KEY}" ]; then
+            printf '%s' "${CERT}" > afir/client.pem
+            printf '%s' "${KEY}"  > afir/client.key
+            chmod 600 afir/client.pem afir/client.key
+            AUTH=(--cert afir/client.pem --key afir/client.key)
+          fi
+          index=0
+          while IFS= read -r url; do
+            [ -z "${url}" ] && continue
+            index=$((index + 1))
+            echo "Hole Datenangebot ${index}"
+            curl -fsSL --retry 3 --retry-delay 5 --max-time 300 \
+                 "${AUTH[@]}" "${url}" -o "afir/feed-${index}.json"
+          done <<< "${FEEDS}"
+          rm -f afir/client.pem afir/client.key
+          python3 server/prices.py --db server/data/whopper.sqlite afir/feed-*.json
+          rm -rf afir
 
       - name: Statischen Datenbestand schreiben
         run: python3 server/export_static.py

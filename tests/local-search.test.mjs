@@ -31,8 +31,8 @@ globalThis.fetch = async (url) => {
   throw new Error(`Im Test nicht erlaubt: ${url}`);
 };
 
-const { localBackend, parseGpx, isAddress, isPlaceholder, columnAFromSheet, thin } =
-  await import('../web/local-search.js');
+const { localBackend, parseGpx, isAddress, isPlaceholder, columnAFromSheet, thin,
+        usableChargers } = await import('../web/local-search.js');
 
 const DORTMUND = { lat: 51.5142, lon: 7.4653 };
 const STUTTGART = { lat: 48.7758, lon: 9.1829 };
@@ -245,4 +245,27 @@ test('Netzauswahl und Mindestleistung wirken zusammen', { skip: !dataAvailable }
   assert.ok(schnell.spots.length > 0);
   assert.ok(schnell.spots.length < alle.spots.length);
   assert.ok(schnell.spots.every((s) => s.chargers.every((c) => c.powerKw >= 50)));
+});
+
+
+// Die echten Datendateien enthalten keine Preise, solange niemand ein
+// AFIR-Abonnement hat. Der Filter wird deshalb direkt geprueft, an einem
+// gebauten Lokal.
+test('Preisfilter nimmt nur Säulen mit bekanntem Preis unter der Grenze', () => {
+  const spot = { chargers: [
+    { id: 'teuer', gapM: 50, network: 'enbw', powerKw: 150, priceKwh: 0.79 },
+    { id: 'ohne', gapM: 60, network: 'enbw', powerKw: 150 },
+    { id: 'guenstig', gapM: 90, network: 'enbw', powerKw: 150, priceKwh: 0.39 },
+    { id: 'genau', gapM: 100, network: 'enbw', powerKw: 150, priceKwh: 0.5 },
+  ] };
+  const filter = { gapM: 300, networks: [], minPowerKw: 0 };
+
+  // Ohne Grenze bleibt alles, auch die Säule ohne Preisangabe.
+  assert.deepEqual(usableChargers(spot, { ...filter, maxPriceKwh: 0 }).map((c) => c.id),
+                   ['teuer', 'ohne', 'guenstig', 'genau']);
+
+  // Mit Grenze: kein bekannter Preis heisst nicht günstig, und die Grenze
+  // selbst zählt nicht mehr dazu. Dieselbe Regel wie im Server.
+  assert.deepEqual(usableChargers(spot, { ...filter, maxPriceKwh: 0.5 }).map((c) => c.id),
+                   ['guenstig']);
 });

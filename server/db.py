@@ -62,7 +62,17 @@ class SpotDatabase:
 
     def meta(self) -> dict:
         rows = self._connection.execute("SELECT key, value FROM meta").fetchall()
-        return {row["key"]: row["value"] for row in rows}
+        meta = {row["key"]: row["value"] for row in rows}
+        # Preisstand mit ausliefern, damit die App den Preisknopf nur zeigt,
+        # wenn es Preise gibt. Dieselben Felder wie im statischen Export.
+        row = self._connection.execute(
+            "SELECT COUNT(*) n, MAX(fetched_at) stand FROM charger_price"
+            " WHERE price_kwh IS NOT NULL"
+        ).fetchone()
+        meta["pricedChargers"] = row["n"] if row else 0
+        if row and row["n"]:
+            meta["pricesFetchedAt"] = row["stand"]
+        return meta
 
     # ---- Umkreissuche ---------------------------------------------------
 
@@ -75,6 +85,7 @@ class SpotDatabase:
         networks: Sequence[str] = (),
         min_power_kw: float = 0.0,
         kinds: Sequence[str] = DEFAULT_KINDS,
+        max_price_kwh: float = 0.0,
     ) -> list[dict]:
         south, west, north, east = box_around(lat, lon, radius_m)
         stores = self._stores_in_box(south, west, north, east, kinds)
@@ -84,7 +95,7 @@ class SpotDatabase:
             distance = haversine_m(lat, lon, store["lat"], store["lon"])
             if distance > radius_m:
                 continue
-            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw)
+            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw, max_price_kwh)
             if not chargers:
                 continue
             spot = self._spot(store, chargers)
@@ -105,6 +116,7 @@ class SpotDatabase:
         networks: Sequence[str] = (),
         min_power_kw: float = 0.0,
         kinds: Sequence[str] = DEFAULT_KINDS,
+        max_price_kwh: float = 0.0,
     ) -> list[dict]:
         if len(points) < 2:
             return []
@@ -134,7 +146,7 @@ class SpotDatabase:
             )
             if offset > corridor_m:
                 continue
-            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw)
+            chargers = self._chargers_for(store["id"], gap_m, networks, min_power_kw, max_price_kwh)
             if not chargers:
                 continue
             spot = self._spot(store, chargers)
@@ -169,6 +181,7 @@ class SpotDatabase:
         gap_m: float,
         networks: Sequence[str] = (),
         min_power_kw: float = 0.0,
+        max_price_kwh: float = 0.0,
     ) -> list[dict]:
         """Saeulen zu einem Lokal, gefiltert nach Abstand, Netz und Leistung.
 
@@ -182,8 +195,13 @@ class SpotDatabase:
         # Saeule bei 300,39 m als "300 m zur Saeule" zu beschriften und sie
         # gleichzeitig aus der 300-m-Suche zu werfen. Die Form mit + 0,5 statt
         # ROUND() laesst den Index auf pair(store_id, gap_m) in Ruhe.
+        #
+        # Der Preis kommt per LEFT JOIN dazu, denn ohne AFIR-Abonnement ist die
+        # Tabelle leer und die App muss trotzdem laufen.
         query = (
-            "SELECT c.*, p.gap_m FROM pair p JOIN charger c ON c.id = p.charger_id"
+            "SELECT c.*, p.gap_m, cp.price_kwh, cp.currency, cp.price_updated_at"
+            " FROM pair p JOIN charger c ON c.id = p.charger_id"
+            " LEFT JOIN charger_price cp ON cp.charger_id = c.id"
             " WHERE p.store_id = ? AND p.gap_m < ? + 0.5 AND c.is_car = 1"
         )
         parameters: list = [store_id, gap_m]
@@ -194,6 +212,11 @@ class SpotDatabase:
         if min_power_kw > 0:
             query += " AND c.power_kw >= ?"
             parameters.append(min_power_kw)
+        if max_price_kwh > 0:
+            # Kein Preis heisst nicht guenstig. Wer nach einer Preisgrenze
+            # sucht, will nur Saeulen sehen, bei denen der Preis feststeht.
+            query += " AND cp.price_kwh IS NOT NULL AND cp.price_kwh < ?"
+            parameters.append(max_price_kwh)
         query += " ORDER BY p.gap_m"
         return [charger_payload(row) for row in self._connection.execute(query, parameters)]
 
@@ -202,9 +225,22 @@ class SpotDatabase:
         return spot_payload(store, chargers)
 
 
+def _optional(row, key):
+    """Spalte lesen, die es je nach Abfrage geben kann oder nicht."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def charger_payload(row) -> dict:
-    """Eine Ladesaeule, wie sie an die App geht."""
-    return {
+    """Eine Ladesaeule, wie sie an die App geht.
+
+    Der Ad-hoc-Preis reist nur mit, wenn einer bekannt ist. Ohne
+    AFIR-Abonnement ist das nie der Fall, und dann soll das Feld auch nicht
+    als null im Export stehen: das waeren 24558 mal vier Bytes fuer nichts.
+    """
+    payload = {
         "id": row["id"],
         "lat": row["lat"],
         "lon": row["lon"],
@@ -215,6 +251,14 @@ def charger_payload(row) -> dict:
         "fee": row["fee"],
         "gapM": round(row["gap_m"]),
     }
+    price = _optional(row, "price_kwh")
+    if price is not None:
+        payload["priceKwh"] = round(price, 4)
+        payload["priceCurrency"] = _optional(row, "currency") or "EUR"
+        stand = _optional(row, "price_updated_at")
+        if stand:
+            payload["priceUpdatedAt"] = stand
+    return payload
 
 
 def spot_payload(store, chargers: list[dict]) -> dict:

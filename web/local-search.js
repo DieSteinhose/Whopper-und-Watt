@@ -4,10 +4,10 @@
 // Browser, und die Suche laeuft lokal. Das ist nebenbei die ehrlichere PWA:
 // nach dem ersten Laden funktioniert die Suche auch offline.
 //
-// Der Bestand kommt in zwei Teilen. Die Ketten (spots.json, 1651 Lokale,
-// gepackt 445 KB) werden immer geladen, die uebrigen veganen Lokale
-// (spots-vegan.json, 12655 Lokale, gepackt 5,0 MB) erst, wenn jemand eine
-// vegane Kategorie anhakt. In einer Datei waeren es 5,5 MB gepackt und 38 MB
+// Der Bestand kommt in zwei Teilen. Die Ketten (spots.json, 1650 Lokale,
+// gepackt 193 KB) werden immer geladen, die uebrigen veganen Lokale
+// (spots-vegan.json, 12596 Lokale, gepackt 1,5 MB) erst, wenn jemand eine
+// vegane Kategorie anhakt. In einer Datei waeren es 1,7 MB gepackt und 10 MB
 // entpackt, die jede Installation beim Start holen und durch JSON.parse
 // schicken muesste, auch fuer eine Suche nach Burger King.
 //
@@ -67,12 +67,15 @@ async function load(kinds) {
 // Dieselben Bedingungen wie _chargers_for im Server. Eine leere Netzliste
 // heisst: alle Netze. Eine Mindestleistung schliesst Saeulen ohne
 // Leistungsangabe aus, und das sind in OSM knapp zwei Drittel.
-function usableChargers(spot, { gapM, networks, minPowerKw }) {
+export function usableChargers(spot, { gapM, networks, minPowerKw, maxPriceKwh }) {
   const wanted = networks ?? [];
   return spot.chargers.filter((charger) => {
     if (charger.gapM > gapM) return false;
     if (wanted.length && !wanted.includes(charger.network)) return false;
     if (minPowerKw > 0 && !(charger.powerKw >= minPowerKw)) return false;
+    // Kein bekannter Preis heisst nicht guenstig. Dieselbe Regel wie im
+    // Server, sonst antworten die beiden Betriebsarten verschieden.
+    if (maxPriceKwh > 0 && !(charger.priceKwh < maxPriceKwh)) return false;
     return true;
   });
 }

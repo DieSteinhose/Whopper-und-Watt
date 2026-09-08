@@ -8,14 +8,20 @@ andere beantwortet die Frage dieser App nicht und waere nur Ballast.
 
 Geschrieben wird in zwei Teilen, und das ist der Punkt:
 
-  spots.json        die Ketten, gemessen 1651 Lokale, 445 KB gepackt
-  spots-vegan.json  die uebrigen veganen Lokale, 12655 Stueck, 5,0 MB gepackt
+  spots.json        die Ketten, gemessen 1650 Lokale, 193 KB gepackt
+  spots-vegan.json  die uebrigen veganen Lokale, 12596 Stueck, 1,5 MB gepackt
 
-In einer Datei waeren das 5,5 MB gepackt und knapp 38 MB entpackt, die jede
+In einer Datei waeren das 1,7 MB gepackt und knapp 10 MB entpackt, die jede
 Installation herunterladen und beim Start durch JSON.parse schicken muesste,
 auch wenn nur nach Burger King gesucht wird. Die Voreinstellung laedt deshalb
 nur den kleinen Teil. Der grosse kommt erst, wenn jemand eine vegane Kategorie
 anhakt, und liegt danach im Cache.
+
+Mit Ad-hoc-Preisen wachsen beide Teile, gemessen an einem Bestand mit Preisen
+an 36 Prozent der Saeulen: 229 KB und 1,8 MB, also rund ein Viertel mehr. Das
+sind zum kleineren Teil die Preisfelder selbst und zum groesseren die zweite
+Klassenachse unten, die je Lokal mehr Saeulen stehen laesst. Ohne
+AFIR-Abonnement bleibt es bei den Zahlen oben.
 
     python3 server/export_static.py --db server/data/whopper.sqlite --out web/data/spots.json
 """
@@ -33,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from db import charger_payload, spot_payload  # noqa: E402
 from schema import connect as open_database  # noqa: E402
-from geo import POWER_STEPS, power_step  # noqa: E402
+from geo import POWER_STEPS, PRICE_STEPS, power_step, price_step  # noqa: E402
 
 # Der Zusatzteil heisst wie die Hauptdatei, nur mit diesem Anhaengsel.
 VEGAN_SUFFIX = "-vegan"
@@ -55,10 +61,11 @@ VEGAN_SUFFIX = "-vegan"
 # naeher dran sind. Eine Klasse ist ein Paar aus Netz und Leistungsstufe,
 # denn genau danach laesst sich in der App filtern.
 #
-# Die Stufen stehen in geo.POWER_STEPS. Kommt in der App ein Knopf "ab 150 kW"
-# dazu, muss die Stufe dort ergaenzt werden, sonst faellt eine 150-kW-Saeule
-# aus der Datei, sobald zwei langsamere naeher dran sind. Genau das ist beim
-# Bauen passiert und hat 47 Lokale gekostet.
+# Die Stufen stehen in geo.POWER_STEPS und geo.PRICE_STEPS. Kommt in der App
+# ein Knopf "ab 150 kW" oder "unter 39 ct" dazu, muss die Stufe dort ergaenzt
+# werden, sonst faellt eine 150-kW-Saeule aus der Datei, sobald zwei langsamere
+# naeher dran sind. Genau das ist beim Bauen passiert und hat 47 Lokale
+# gekostet.
 #
 # Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist
 # chargersCapped mit, und die App schreibt dann "N+".
@@ -69,8 +76,10 @@ def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     chargers: dict[str, list[dict]] = {}
     query = (
         "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.network,"
-        " c.power_kw, c.capacity, c.fee"
+        " c.power_kw, c.capacity, c.fee,"
+        " cp.price_kwh, cp.currency, cp.price_updated_at"
         " FROM pair p JOIN charger c ON c.id = p.charger_id"
+        " LEFT JOIN charger_price cp ON cp.charger_id = c.id"
         " WHERE c.is_car = 1"
         " ORDER BY p.store_id, p.gap_m"
     )
@@ -82,15 +91,21 @@ def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
     return chargers
 
 
-def charger_class(charger: dict) -> tuple[str | None, int]:
-    """Netz und Leistungsstufe. Genau danach filtert die App.
+def charger_class(charger: dict) -> tuple[str | None, int, int]:
+    """Netz, Leistungsstufe und Preisstufe. Genau danach filtert die App.
 
     Fuer eine Abfrage ab Stufe s braucht die App die naechste Saeule mit
     Stufe >= s. Wird je (Netz, Stufe) die naechste behalten, ist das Minimum
     ueber alle Stufen >= s genau diese Saeule. Damit stimmt die gekuerzte
     Datei fuer jede Stufe aus geo.POWER_STEPS, und nur fuer die.
+
+    Die Preisstufe steht aus demselben Grund hier. Ohne sie faellt die
+    guenstige Saeule aus der Datei, sobald zwei teurere naeher am Lokal
+    stehen, und der Knopf "unter 50 ct" verliert Lokale. Solange keine
+    Preisdaten in der Datenbank stehen, ist die Stufe ueberall 0 und die
+    Klassen bleiben so grob wie vorher.
     """
-    return charger["network"], power_step(charger["powerKw"])
+    return charger["network"], power_step(charger["powerKw"]), price_step(charger.get("priceKwh"))
 
 
 def cap_chargers(chargers: list[dict], per_class: int = CHARGERS_PER_CLASS) -> tuple[list[dict], bool]:
@@ -102,13 +117,35 @@ def cap_chargers(chargers: list[dict], per_class: int = CHARGERS_PER_CLASS) -> t
     if per_class <= 0:
         return chargers, False
     kept: list[dict] = []
-    seen: dict[tuple[str | None, bool], int] = {}
+    seen: dict[tuple[str | None, int, int], int] = {}
     for charger in chargers:
         klass = charger_class(charger)
         if seen.get(klass, 0) < per_class:
             seen[klass] = seen.get(klass, 0) + 1
             kept.append(charger)
     return kept, len(kept) < len(chargers)
+
+
+def _price_meta(connection: sqlite3.Connection) -> dict:
+    """Wie viele Preise stehen drin und wie alt sind sie.
+
+    Das gehoert in die Datei, weil es der Schwachpunkt dieser Betriebsart ist.
+    AFIR verlangt, dass ein geaenderter Ad-hoc-Preis binnen einer Minute
+    veroeffentlicht wird; ein naechtlicher Export ist im schlechtesten Fall 24
+    Stunden alt. Die App muss den Stand deshalb dazuschreiben duerfen, statt
+    eine Zahl als Tatsache hinzustellen, die es seit gestern nicht mehr ist.
+    """
+    row = connection.execute(
+        "SELECT COUNT(*) n, MIN(fetched_at) aeltester, MAX(fetched_at) juengster"
+        " FROM charger_price WHERE price_kwh IS NOT NULL"
+    ).fetchone()
+    if not row or not row["n"]:
+        return {"pricedChargers": 0}
+    return {
+        "pricedChargers": row["n"],
+        "pricesFetchedAt": row["juengster"],
+        "pricesOldestAt": row["aeltester"],
+    }
 
 
 def _write(path: Path, payload: dict) -> tuple[int, int]:
@@ -148,6 +185,7 @@ def export(db_path: Path, out_path: Path) -> dict:
     meta["spots"] = len(parts["base"]) + len(parts["vegan"])
     meta["baseSpots"] = len(parts["base"])
     meta["veganSpots"] = len(parts["vegan"])
+    meta.update(_price_meta(connection))
 
     vegan_path = out_path.with_name(f"{out_path.stem}{VEGAN_SUFFIX}{out_path.suffix}")
     written = {

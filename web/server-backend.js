@@ -30,6 +30,7 @@ export const serverBackend = {
       gap_m: params.gapM,
       networks: (params.networks ?? []).join(','),
       min_power_kw: params.minPowerKw ?? 0,
+      max_price_kwh: params.maxPriceKwh ?? 0,
       kinds: (params.kinds ?? []).join(','),
     });
     return api(`api/spots?${query}`);
@@ -47,6 +48,7 @@ export const serverBackend = {
         gapM: params.gapM,
         networks: params.networks,
         minPowerKw: params.minPowerKw,
+        maxPriceKwh: params.maxPriceKwh,
         kinds: params.kinds,
       }),
     });

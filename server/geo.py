@@ -113,6 +113,32 @@ def power_step(power_kw: float | None) -> int:
     return max(index for index, step in enumerate(POWER_STEPS) if value >= step)
 
 
+# Ab hier gilt ein Ad-hoc-Preis als guenstig. 0,50 EUR/kWh liegt ungefaehr am
+# unteren Rand dessen, was die grossen Netze ohne Vertrag am Schnelllader
+# nehmen; Lidl und Kaufland liegen darunter, deshalb der Wunsch nach dem Knopf.
+CHEAP_PRICE_EUR = 0.50
+
+# Wie POWER_STEPS eine Filterstufe, und aus demselben Grund hier und nicht im
+# Export: die Kuerzung der Saeulenlisten muss je Stufe die naechste behalten,
+# sonst verschwindet die guenstige Saeule hinter zwei teuren.
+PRICE_STEPS: tuple[float, ...] = (CHEAP_PRICE_EUR,)
+
+
+def price_step(price_kwh: float | None) -> int:
+    """Guenstigste erfuellte Preisstufe als Index, 0 wenn kein Preis bekannt.
+
+    Anders herum als bei der Leistung: teuer ist die Voreinstellung, denn ein
+    fehlender Preis darf nie als guenstig durchgehen. Index 0 heisst "keine
+    Aussage", Index 1 heisst "unter CHEAP_PRICE_EUR".
+    """
+    if price_kwh is None:
+        return 0
+    return max(
+        (index + 1 for index, grenze in enumerate(PRICE_STEPS) if price_kwh < grenze),
+        default=0,
+    )
+
+
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     d_lat = math.radians(lat2 - lat1)
     d_lon = math.radians(lon2 - lon1)

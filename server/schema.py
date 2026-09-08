@@ -67,6 +67,38 @@ CREATE INDEX IF NOT EXISTS pair_by_store ON pair(store_id, gap_m);
 CREATE TABLE IF NOT EXISTS ingest_cell (cell TEXT PRIMARY KEY, done_at TEXT NOT NULL);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS store_rtree USING rtree(rowid, min_lat, max_lat, min_lon, max_lon);
+
+-- Die Zuordnung unserer OSM-Saeule zu einem Ladepunkt aus dem AFIR-Bestand.
+-- Eigene Tabelle und nicht eine Spalte an charger, weil sie eine andere
+-- Lebensdauer hat: einmal gesetzt bleibt sie, solange sie plausibel ist. Ein
+-- Preis, der ueber Nacht springt, weil ein Meter Koordinatenunterschied den
+-- naechsten Nachbarn kippen liess, waere schlimmer als kein Preis. 33 Prozent
+-- unserer Saeulen haben eine weitere im Umkreis von 25 m.
+CREATE TABLE IF NOT EXISTS charger_link (
+    charger_id TEXT PRIMARY KEY,
+    external_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    method TEXT NOT NULL,
+    distance_m REAL,
+    operator_ok INTEGER NOT NULL DEFAULT 0,
+    matched_lat REAL,
+    matched_lon REAL,
+    first_seen TEXT NOT NULL,
+    last_confirmed TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS charger_link_by_external ON charger_link(external_id);
+
+-- Der Preis selbst, getrennt von der Zuordnung: er aendert sich laut Profil
+-- binnen einer Minute, die Zuordnung praktisch nie.
+CREATE TABLE IF NOT EXISTS charger_price (
+    charger_id TEXT PRIMARY KEY,
+    price_kwh REAL,
+    currency TEXT NOT NULL DEFAULT 'EUR',
+    components TEXT,
+    price_updated_at TEXT,
+    fetched_at TEXT NOT NULL
+);
 """
 
 # Spalten, die spaeter dazugekommen sind. Eine bestehende Datenbank soll nicht
@@ -103,8 +135,12 @@ def connect(path: Path, create: bool = True, **kwargs) -> sqlite3.Connection:
 
     connection = sqlite3.connect(path, **kwargs)
     connection.row_factory = sqlite3.Row
-    if create:
-        connection.executescript(SCHEMA)
+    # SCHEMA laeuft immer, auch lesend. Alles darin ist CREATE ... IF NOT
+    # EXISTS, also folgenlos fuer eine vollstaendige Datenbank. Nur so bekommt
+    # ein Bestand aus dem Actions-Cache auch neue *Tabellen*, nicht bloss neue
+    # Spalten. Das create-Flag entscheidet allein, ob eine fehlende Datei
+    # angelegt werden darf oder ein Fehler ist.
+    connection.executescript(SCHEMA)
     migrate(connection)
     connection.executescript(SCHEMA_INDEXES)
     return connection

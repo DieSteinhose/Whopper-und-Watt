@@ -11,7 +11,7 @@
 // Service Worker nur neu, wenn sich dessen eigene Bytes unterscheiden; bleibt
 // die Zeile stehen, liefert eine bestehende Installation ewig das alte app.js
 // aus dem Cache aus, egal was deployt wurde.
-const VERSION = 'whopper-watt-v3';
+const VERSION = 'whopper-watt-v4';
 const SHELL = [
   './',
   'index.html',

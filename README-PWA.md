@@ -77,6 +77,7 @@ deshalb in der Beschriftung der Zeile, statt es erraten zu lassen.
 | **Lidl** | `operator:wikidata=Q151954` oder "Lidl" im Betreiber | 289 |
 | **Kaufland** | `operator:wikidata=Q685967` oder "Kaufland" im Betreiber | 139 |
 | **ab 50 kW** | `power_kw >= 50` aus den OSM-Leistungstags | 3.509 |
+| **unter 50 ct** | Ad-hoc-Preis unter 0,50 €/kWh aus der Mobilithek | nur mit AFIR-Abonnement |
 
 Die Wikidata-Ids sind am Datenbestand geprüft, nicht aus dem Kopf. Dabei kam heraus, dass der
 bisherige EnBW-Anker `Q321820` deutschlandweit **null mal** vorkommt und damit wirkungslos war;
@@ -96,8 +97,10 @@ Actions-Cache und der Ingest läuft gar nicht. Eine Regel, die nur auf dem Schre
 erreicht den Datenbestand dann nie. Als Spalte mit Nachtrag beim Öffnen heilt sich jede
 Datenbank selbst, und eine spätere Änderung der Regel kostet keinen neuen Overpass-Lauf.
 
-**Preise gibt es in der App nicht**, siehe den Abschnitt weiter unten. Die Karte zeigt zur
-Säule nur, was in OSM steht: Leistung, Anzahl Ladepunkte und ob `fee` auf ja oder nein steht.
+**Preise stehen nicht in OSM**, siehe den Abschnitt weiter unten. Aus OSM zeigt die Karte zur
+Säule nur Leistung, Anzahl Ladepunkte und ob `fee` auf ja oder nein steht. Echte Ad-hoc-Preise
+kommen aus der Mobilithek und brauchen ein eigenes Abonnement; ohne eines blendet die App den
+Knopf "unter 50 ct" aus, statt einen Filter anzubieten, der garantiert nichts findet.
 
 **Die Leistungsangabe fehlt oft.** Von 25.456 Säulen im Bestand haben 9.188 überhaupt eine
 Leistung in OSM, also gut ein Drittel. "ab 50 kW" blendet alles ohne Angabe aus, und das steht
@@ -128,8 +131,85 @@ Demo-Zugang auf Anfrage, allerdings mit eingeschränkten Daten und ausdrücklich
 kommerzielle Nutzung. Das Bundesnetzagentur-Ladesäulenregister hat Standorte und Leistung, aber
 keine Preise; Open Charge Map hat ein Freitextfeld mit ähnlich dünner Abdeckung wie OSM.
 
-Der Lidl- und der Kaufland-Knopf sind der ehrliche Ersatz: statt einen Preis zu behaupten, den
-die Daten nicht hergeben, wird nach den Betreibern gefiltert, die günstig sind.
+Der Lidl- und der Kaufland-Knopf waren der erste Ersatz: statt einen Preis zu behaupten, den die
+Daten nicht hergeben, nach den Betreibern filtern, die günstig sind. Sie bleiben, denn sie
+funktionieren ohne jede Anmeldung. Für echte Preise gibt es inzwischen einen Weg.
+
+### Die Mobilithek, also die offene Schnittstelle
+
+Seit dem 14.04.2026 verlangt [AFIR](https://eur-lex.europa.eu/eli/reg/2023/1804/oj) Artikel 20
+von jedem Betreiber öffentlich zugänglicher Ladepunkte, statische und dynamische Daten
+kostenfrei und diskriminierungsfrei bereitzustellen, und der **Ad-hoc-Preis ist ein
+Pflichtfeld**. Nationaler Zugangspunkt in Deutschland ist die
+[Mobilithek](https://mobilithek.info/). Format ist DATEX II 3 im
+[AFIR-Profil](https://github.com/MobilithekDE/AFIR-DATEX-II-Recharging-Profil).
+
+Das Modell steckt in zwei Veröffentlichungen, und man braucht beide:
+
+| | Inhalt | Änderungstakt |
+|---|---|---|
+| `EnergyInfrastructureTablePublication` | Standorte, Ladepunkte, EVSE-Ids | selten |
+| `EnergyInfrastructureStatusPublication` | Belegung und Preis | laut Profil binnen einer Minute |
+
+Verbunden sind sie über die `idG` eines `refillPoint`. `server/afir.py` liest beides,
+`server/prices.py` ordnet die Ladepunkte unseren OSM-Säulen zu und schreibt die Preise weg.
+
+Zugang muss man selbst einrichten: auf der Mobilithek registrieren, die Datenangebote
+abonnieren, kostenfrei, aber mit Client-Zertifikat. Ohne Abonnement steht in der Datenbank kein
+einziger Preis, und die App blendet den Knopf "unter 50 ct" dann aus, statt einen Filter
+anzubieten, der garantiert nichts findet.
+
+```
+python3 server/prices.py tabelle.json status.json      # zuordnen und Preise schreiben
+python3 server/prices.py --report                      # nur zeigen, was zugeordnet ist
+python3 server/prices.py --db neu.sqlite --von alt.sqlite   # Zuordnung übernehmen
+```
+
+Im Workflow hängt das an der Repository-Variablen `AFIR_FEEDS` (eine URL je Zeile) und den
+optionalen Secrets `AFIR_CLIENT_CERT` und `AFIR_CLIENT_KEY`. Ist die Variable leer, wird der
+Schritt übersprungen.
+
+### Das eigentliche Problem ist das Zuordnen
+
+Unsere Säulen sind OSM-Knoten, die AFIR-Daten haben eigene Ids, und einen gemeinsamen Schlüssel
+gibt es nur manchmal: `ref:EU:EVSE` steht an 2213 unserer 24558 Säulen, also an 9 Prozent. Der
+Rest muss über Koordinaten und Betreibernamen laufen, und da liegt die Falle. Ein Drittel
+unserer Säulen hat eine weitere im Umkreis von 25 m, im Schnitt 2,6 davon.
+
+Der erste Entwurf ließ jede Säule unabhängig nach dem nächsten Ladepunkt greifen. Gemessen an
+einem simulierten Feed aus den eigenen Säulen, bei dem zu jedem Punkt bekannt ist, aus welcher
+Säule er gebaut wurde: **19,4 Prozent aller Verbindungen falsch**, weil sich Nachbarn
+gegenseitig die Punkte wegschnappten. Jetzt darf jeder Ladepunkt höchstens einmal vergeben
+werden, und das beste Paar gewinnt zuerst:
+
+| | Verbindungen | davon richtig |
+|---|---:|---:|
+| unabhängig, erster Entwurf | 16241 | 80,6 % |
+| wechselseitig | 14683 | **89,5 %** |
+| wechselseitig, nur mit Betreibertreffer | 12393 | 90,2 % |
+
+Und jetzt die Zahl, auf die es ankommt: **99,8 Prozent der angezeigten Preise stimmen.** Die
+10,5 Prozent Fehlgriffe sind fast ausnahmslos Vertauschungen innerhalb eines Ladeparks, zwei
+Säulen desselben Betreibers sieben Meter auseinander. Der Ad-hoc-Preis hängt am Tarif des
+Betreibers, nicht am einzelnen Stecker, also sieht man davon nichts. Übrig bleiben 0,2 Prozent
+echte Preisfehler, alle innerhalb von 18 m. Die strenge Variante kauft 0,7 Prozentpunkte
+Verbindungsgüte für 16 Prozent aller Punkte, ein schlechter Tausch, deshalb ist
+`--nur-mit-betreiber` nicht die Voreinstellung.
+
+Die Zuordnung wird gespeichert, in `charger_link`. Nicht aus Geschwindigkeit, der Abgleich
+kostet 1,1 Sekunden, sondern wegen der Stabilität: ohne feste Zuordnung entschiede bei jedem
+Lauf ein Meter Koordinatenunterschied, welcher Punkt gewinnt, und mit ihm der angezeigte Preis.
+Eine gesetzte Verbindung wird bestätigt, nicht neu gesucht, solange sie plausibel bleibt, und
+sie überlebt den nächtlichen Ingest in die frische Datenbank.
+
+### Was daran schwach bleibt
+
+AFIR verlangt, dass ein geänderter Ad-hoc-Preis binnen einer Minute veröffentlicht wird. Der
+nächtliche Export ist im schlechtesten Fall 24 Stunden alt. Auf GitHub Pages läuft kein Server,
+der stündlich nachladen könnte, also ist der Preis dort eine Momentaufnahme von letzter Nacht.
+Deshalb reist der Preisstand als `pricesFetchedAt` mit, steht im Tooltip des Knopfes und im
+Datenbestands-Tooltip. Wer aktuelle Preise braucht, betreibt den Server und lässt
+`server/prices.py` häufiger laufen.
 
 ## Warum überhaupt ein Server
 
@@ -237,6 +317,14 @@ beide Seiten zusammenpassen.
 **Die Datenbank liegt nicht im Repository.** Sie ist rund 50 MB groß und ändert sich bei jedem
 Ingest komplett; als Binärdatei in der Git-Historie wäre sie am falschen Platz. Der Workflow
 hält sie stattdessen im Actions-Cache, lokal baut sie `server/ingest.py`.
+
+Zwei Tabellen gehören nicht dem Ingest und überleben ihn deshalb ausdrücklich:
+`charger_link` (welcher AFIR-Ladepunkt zu welcher Säule gehört, mit Regel, Abstand und
+Zeitstempeln) und `charger_price` (der letzte bekannte Preis je Säule). Der Ingest baut nach
+`fresh.sqlite`, also in eine leere Datenbank; `prices.carry_over` holt beide Tabellen aus dem
+alten Stand herüber, bevor er übernommen wird, und wirft dabei weg, was keine Säule mehr hat.
+Ohne diesen Schritt wäre die Zuordnung jeden Morgen weg, und damit genau die Stabilität, wegen
+der sie überhaupt gespeichert wird.
 
 ## Server
 
@@ -352,7 +440,7 @@ Nominatim und OSRM.
 
 In einer ungekürzten Datei wären das 5,5 MB gepackt und 38 MB entpackt, die jede Installation
 beim Start herunterladen und durch `JSON.parse` schicken müsste, auch für eine Suche nach
-Burger King. Zwei Maßnahmen bringen das auf 1,75 MB:
+Burger King. Zwei Maßnahmen bringen das auf 1,70 MB:
 
 **Aufteilen.** Der Service Worker installiert nur den kleinen Teil vorab; der große landet beim
 ersten Abruf im Cache und ist ab dann ebenfalls offline da. Gemessen im Browser: eine Suche
@@ -367,16 +455,19 @@ Das kostet **keine** Treffer, denn die App braucht je Filterstellung nur zwei Di
 bleiben exakt: *gibt es hier überhaupt eine passende Säule bis X Meter* und *welche ist die
 nächste*. Die nächste Lidl-Säule ist die nächste bei jedem Abstand, der sie einschließt.
 
-Eine Klasse ist ein Paar aus **Netz und Leistungsstufe** (`geo.POWER_STEPS`), denn genau danach
-lässt sich filtern. Beim Bauen habe ich zuerst nur nach Netz und "schneller als 50 kW"
-klassiert, und eine Prüfung mit Schwelle 150 kW verlor prompt 47 Lokale: deren 150-kW-Säule
-fiel raus, weil zwei 50-kW-Säulen näher dran waren. Wer einen Knopf "ab 150 kW" ergänzt, muss
-die Stufe in `POWER_STEPS` mitnehmen; der Test `test_capped_export_answers_like_the_full_list`
-schlägt sonst fehl.
+Eine Klasse ist ein Tripel aus **Netz, Leistungsstufe und Preisstufe** (`geo.POWER_STEPS`,
+`geo.PRICE_STEPS`), denn genau danach lässt sich filtern. Beim Bauen habe ich zuerst nur nach
+Netz und "schneller als 50 kW" klassiert, und eine Prüfung mit Schwelle 150 kW verlor prompt 47
+Lokale: deren 150-kW-Säule fiel raus, weil zwei 50-kW-Säulen näher dran waren. Der Ad-hoc-Preis
+brachte dieselbe Achse ein zweites Mal: ohne Preisstufe verschwände die günstige Säule, sobald
+zwei teurere näher am Lokal stehen. Wer einen Knopf "ab 150 kW" oder "unter 39 ct" ergänzt, muss
+die Stufe dort mitnehmen; der Test `test_capped_export_answers_like_the_full_list` schlägt sonst
+fehl, und zwar nachweislich: mit entfernter Preisstufe fällt er sofort.
 
 Gegengeprüft an echten Daten: **48 Kombinationen aus Netzauswahl, Leistungsstufe und Abstand,
 null Abweichungen** zwischen gekürzter Datei und voller Datenbank. Und im Browser gegen den
-laufenden Server: **60 Kombinationen, null Abweichungen**.
+laufenden Server: **60 Kombinationen, null Abweichungen**. Der Test deckt inzwischen 128
+Kombinationen ab, mit der Preisgrenze als vierter Achse.
 
 Ungenau wird allein die Zeile "N Standorte in Reichweite". Deshalb reist `chargersCapped` mit,
 und die App schreibt dann "3+" statt "3". Mit Server steht dort weiterhin die exakte Zahl, denn

@@ -43,6 +43,8 @@ const state = {
   // die urspruengliche Frage dieser App ist, und ist abwaehlbar.
   networks: ['enbw'],
   minPowerKw: 0,
+  // 0 heisst "Preis egal". Bleibt 0, solange der Bestand keine Preise hat.
+  maxPriceKwh: 0,
   departure: null, // null bedeutet "jetzt"
   spots: [],
   route: null,
@@ -65,6 +67,7 @@ const view = {
   routeForm: document.getElementById('routeForm'),
   kindChips: document.getElementById('kindChips'),
   networkChips: document.getElementById('networkChips'),
+  priceChip: document.getElementById('priceChip'),
   networkLabel: document.getElementById('networkLabel'),
   radiusChips: document.getElementById('radiusChips'),
   corridorChips: document.getElementById('corridorChips'),
@@ -98,6 +101,13 @@ function formatMeters(meters) {
   return `${Math.round(meters / 1000)} km`;
 }
 
+// Preise unter einem Euro liest man in Cent, darueber in Euro. "0,49 EUR"
+// steht an keiner Ladesaeule.
+function formatPrice(euro) {
+  if (euro < 1) return `${Math.round(euro * 100)} ct`;
+  return `${euro.toFixed(2).replace('.', ',')} €`;
+}
+
 function departureTime() {
   return state.departure ? new Date(state.departure) : new Date();
 }
@@ -124,6 +134,9 @@ const NETWORK_LABELS = { enbw: 'EnBW', lidl: 'Lidl', kaufland: 'Kaufland' };
 
 // Ab hier gilt eine Saeule als Schnelllader, wie im Server (geo.FAST_CHARGER_KW).
 const FAST_CHARGER_KW = 50;
+
+// Ab hier gilt ein Ad-hoc-Preis als guenstig, wie im Server (geo.CHEAP_PRICE_EUR).
+const CHEAP_PRICE_EUR = 0.5;
 
 // Obergrenzen fuer die Anzeige. Mit den veganen Kategorien liefert eine Suche
 // ueber 100 km um Berlin gemessen 1934 Treffer. Ungebremst waren das rund 20000
@@ -201,6 +214,7 @@ function searchParams() {
     gapM: state.gapM,
     networks: state.networks,
     minPowerKw: state.minPowerKw,
+    maxPriceKwh: state.maxPriceKwh,
   };
 }
 
@@ -377,6 +391,7 @@ function card(spot, now) {
   else if (spot.vegan && !spot.brand) badges.push('vegane Optionen');
 
   const details = [];
+  if (charger?.priceKwh != null) details.push(`${formatPrice(charger.priceKwh)}/kWh ad hoc`);
   if (charger?.powerKw) details.push(`bis ${trimNumber(charger.powerKw)} kW`);
   if (charger?.capacity) details.push(`${charger.capacity} Ladepunkte`);
   if (charger?.fee) details.push(charger.fee === 'no' ? 'kostenlos' : 'kostenpflichtig');
@@ -598,6 +613,14 @@ view.networkChips.addEventListener('click', (event) => {
     rerunIfSearched();
     return;
   }
+  const price = event.target.dataset?.price;
+  if (price !== undefined) {
+    state.maxPriceKwh = state.maxPriceKwh > 0 ? 0 : Number(price);
+    event.target.setAttribute('aria-pressed', String(state.maxPriceKwh > 0));
+    updateNetworkLabel();
+    rerunIfSearched();
+    return;
+  }
   if (event.target.dataset?.power === undefined) return;
   state.minPowerKw = state.minPowerKw > 0 ? 0 : FAST_CHARGER_KW;
   event.target.setAttribute('aria-pressed', String(state.minPowerKw > 0));
@@ -611,6 +634,7 @@ function updateNetworkLabel() {
   const chosen = state.networks.map((key) => NETWORK_LABELS[key] ?? key);
   const parts = [chosen.length ? chosen.join(', ') : 'alle Netze'];
   if (state.minPowerKw > 0) parts.push(`ab ${FAST_CHARGER_KW} kW`);
+  if (state.maxPriceKwh > 0) parts.push(`unter ${formatPrice(state.maxPriceKwh)}`);
   view.networkLabel.textContent = `Ladesäule: ${parts.join(', ')}`;
 }
 
@@ -704,11 +728,30 @@ updateDepartureLabel();
 updateNetworkLabel();
 render();
 
+// Der Preisknopf haengt am Bestand, nicht am Wunschdenken. Ohne
+// AFIR-Abonnement steht in der Datenbank kein einziger Preis, und ein Knopf,
+// der dann garantiert null Treffer liefert, sieht aus wie ein kaputter Filter.
+function revealPriceChip(meta) {
+  const priced = Number(meta.pricedChargers ?? 0);
+  if (!view.priceChip || !priced) return;
+  view.priceChip.hidden = false;
+  const stand = meta.pricesFetchedAt ? ` · Stand ${meta.pricesFetchedAt}` : '';
+  view.priceChip.title =
+    `Nur Säulen mit bekanntem Ad-hoc-Preis unter ${formatPrice(CHEAP_PRICE_EUR)}/kWh.` +
+    ` Preise für ${priced} Säulen aus der Mobilithek${stand}.` +
+    '\nAd-hoc-Preise ändern sich laufend; dieser Bestand ist so alt wie der letzte Export.';
+}
+
 pickBackend()
   .then((meta) => {
     const source = backend.mode === 'server' ? 'Server' : 'im Browser';
+    const preise = Number(meta.pricedChargers ?? 0)
+      ? `\n${meta.pricedChargers} Säulen mit Ad-hoc-Preis · Preisstand ${meta.pricesFetchedAt ?? '?'}`
+      : '';
     view.status.title =
       `${describeStock(meta)}, ${meta.chargers} Ladesäulen, ${meta.pairs} Paare` +
-      `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at} · Suche ${source}`;
+      `\nBereich ${meta.area ?? '?'} · Stand ${meta.ingested_at} · Suche ${source}` +
+      preise;
+    revealPriceChip(meta);
   })
   .catch(() => setBanner('Kein Datenbestand erreichbar. Angezeigt wird, was im Cache liegt.'));

@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -398,14 +399,15 @@ class DatabaseTest(unittest.TestCase):
     def test_capped_export_answers_like_the_full_list(self):
         """Die Kuerzung darf keine einzige Filterstellung der App veraendern.
 
-        Geprueft wird jede Kombination aus Netzauswahl, Leistungsstufe und
-        Abstand gegen die ungekuerzte Liste: gibt es einen Treffer, und welche
-        ist die naechste passende Saeule.
+        Geprueft wird jede Kombination aus Netzauswahl, Leistungsstufe,
+        Preisgrenze und Abstand gegen die ungekuerzte Liste: gibt es einen
+        Treffer, und welche ist die naechste passende Saeule.
 
-        Der Test haengt an geo.POWER_STEPS. Genau daran ist es beim Bauen
-        schiefgegangen: die Klassen trennten nur bei 50 kW, und eine 150-kW-
-        Abfrage verlor deshalb 47 Lokale, weil je zwei langsamere Saeulen
-        naeher dran waren.
+        Der Test haengt an geo.POWER_STEPS und geo.PRICE_STEPS. Genau daran
+        ist es beim Bauen schiefgegangen: die Klassen trennten nur bei 50 kW,
+        und eine 150-kW-Abfrage verlor deshalb 47 Lokale, weil je zwei
+        langsamere Saeulen naeher dran waren. Mit dem Ad-hoc-Preis kam eine
+        zweite solche Achse dazu.
         """
         import itertools
 
@@ -413,26 +415,38 @@ class DatabaseTest(unittest.TestCase):
 
         # Ein bewusst gemeiner Standort: die schnellen Saeulen sind weiter weg
         # als die langsamen, und die Ketten-Saeulen weiter als die fremden.
+        #
+        # Die Preise sind ebenso gemein gewaehlt: die guenstigen Saeulen liegen
+        # hinter teureren, und die meisten haben gar keinen Preis, so wie im
+        # echten Bestand ohne AFIR-Abonnement.
         chargers = []
-        for index, (network, power) in enumerate([
-            (None, 11.0), (None, 22.0), (None, None), (None, 22.0),
-            ("enbw", 11.0), ("enbw", 22.0), (None, 50.0), (None, 150.0),
-            ("enbw", 150.0), ("lidl", 22.0), ("lidl", 300.0), ("kaufland", 11.0),
-            ("kaufland", 22.0), ("kaufland", 250.0), (None, 350.0),
+        for index, (network, power, price) in enumerate([
+            (None, 11.0, None), (None, 22.0, 0.79), (None, None, None), (None, 22.0, 0.39),
+            ("enbw", 11.0, 0.61), ("enbw", 22.0, None), (None, 50.0, 0.49), (None, 150.0, None),
+            ("enbw", 150.0, 0.59), ("lidl", 22.0, None), ("lidl", 300.0, 0.29),
+            ("kaufland", 11.0, None), ("kaufland", 22.0, 0.55), ("kaufland", 250.0, 0.44),
+            (None, 350.0, None),
         ]):
-            chargers.append({"id": f"node/{index}", "network": network,
-                             "powerKw": power, "gapM": (index + 1) * 40})
+            charger = {"id": f"node/{index}", "network": network,
+                       "powerKw": power, "gapM": (index + 1) * 40}
+            if price is not None:
+                charger["priceKwh"] = price
+            chargers.append(charger)
 
         kept, capped = export_static.cap_chargers(chargers)
         self.assertTrue(capped, "der Testfall kuerzt gar nichts, er prueft also nichts")
         self.assertLess(len(kept), len(chargers))
 
-        def nearest(source, networks, min_kw, gap):
+        def nearest(source, networks, min_kw, gap, max_price):
+            # Dieselbe Regel wie im Server und in local-search.js: kein
+            # bekannter Preis heisst nicht guenstig.
             passend = [
                 item for item in source
                 if item["gapM"] <= gap
                 and (not networks or item["network"] in networks)
                 and (min_kw <= 0 or (item["powerKw"] or 0) >= min_kw)
+                and (max_price <= 0
+                     or (item.get("priceKwh") is not None and item["priceKwh"] < max_price))
             ]
             return passend[0]["id"] if passend else None
 
@@ -441,14 +455,16 @@ class DatabaseTest(unittest.TestCase):
         for size in range(len(keys) + 1):
             for networks in itertools.combinations([k for k in keys if k], size):
                 for min_kw in geo.POWER_STEPS:
-                    for gap in (100, 300, 500, 1000):
-                        combinations += 1
-                        self.assertEqual(
-                            nearest(kept, networks, min_kw, gap),
-                            nearest(chargers, networks, min_kw, gap),
-                            f"networks={networks} min_kw={min_kw} gap={gap}",
-                        )
-        self.assertGreater(combinations, 50)
+                    for max_price in (0.0, *geo.PRICE_STEPS):
+                        for gap in (100, 300, 500, 1000):
+                            combinations += 1
+                            self.assertEqual(
+                                nearest(kept, networks, min_kw, gap, max_price),
+                                nearest(chargers, networks, min_kw, gap, max_price),
+                                f"networks={networks} min_kw={min_kw}"
+                                f" max_price={max_price} gap={gap}",
+                            )
+        self.assertGreater(combinations, 100)
 
     def test_labels_and_flags_travel_with_the_spot(self):
         def one(kinds):
@@ -844,6 +860,510 @@ class IngestTest(unittest.TestCase):
                 connection.close()
             connection = sqlite3.connect(path)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM store").fetchone()[0], 1)
+
+
+# ---- Ad-hoc-Preise aus der Mobilithek ---------------------------------------
+#
+# Die Beispieldateien des amtlichen Profils liegen nicht im Repository: das
+# Profil-Repository der Mobilithek nennt keine Lizenz, und ungefragt fremde
+# Dateien mitzuschleppen ist keine gute Idee. Diese Belege sind deshalb
+# nachgebaut, aber strukturgleich, bis hin zu den beiden verschiedenen
+# Umschlaegen und den doppelt verschachtelten MultilingualStrings.
+
+AFIR_TABELLE = {
+    "payload": {
+        "aegiEnergyInfrastructureTablePublication": {
+            "energyInfrastructureTable": [{
+                "energyInfrastructureSite": [{
+                    "operator": [{"organisationUnit": {
+                        "name": {"values": {"values": [
+                            {"lang": "de", "value": "EnBW mobility+ AG"}
+                        ]}}
+                    }}],
+                    "energyInfrastructureStation": [{
+                        "idG": "station-1",
+                        "locationReference": {"pointByCoordinates": {
+                            "pointCoordinates": {"latitude": 48.69235, "longitude": 9.1946}
+                        }},
+                        "externalIdentifier": [
+                            {"typeOfIdentifier": {"value": "stationIdBNetzA"},
+                             "identifier": "BNA-1"}
+                        ],
+                        "electricEnergy": [{"energyRate": [
+                            {"idG": "rate-1", "applicableCurrency": ["EUR"]}
+                        ]}],
+                        "refillPoint": [{"electricChargingPoint": {
+                            "idG": "point-1",
+                            "externalIdentifier": [
+                                {"typeOfIdentifier": {"extendedValueG": "evseId"},
+                                 "identifier": "DE*ABC*E12345"}
+                            ],
+                            "availableChargingPower": 150000,
+                        }}],
+                    }],
+                }]
+            }]
+        }
+    }
+}
+
+AFIR_STATUS = {
+    "messageContainer": {"payload": [{
+        "aegiEnergyInfrastructureStatusPublication": {
+            "energyInfrastructureSiteStatus": [{
+                "energyInfrastructureStationStatus": [{
+                    "refillPointStatus": [{"electricChargingPointStatus": {
+                        "reference": {"idG": "point-1"},
+                        "status": {"value": "available"},
+                        "lastUpdated": "2026-09-08T12:00:00Z",
+                        "energyRateUpdate": [{
+                            "energyRateReference": {"idG": "rate-1"},
+                            "energyPrice": [
+                                {"priceType": {"value": "pricePerKWh"}, "value": 0.37},
+                                {"priceType": {"value": "pricePerMinute"}, "value": 0.1},
+                            ],
+                        }],
+                    }}]
+                }]
+            }]
+        }
+    }]}
+}
+
+
+def _afir_lesen(*dokumente):
+    import afir
+    return afir.read_publication([json.dumps(doc).encode() for doc in dokumente])
+
+
+class AfirTest(unittest.TestCase):
+    """Das Lesen des DATEX-II-3-Profils, ohne Datenbank."""
+
+    def test_table_and_status_join_on_the_refill_point(self):
+        import afir
+
+        publication = _afir_lesen(AFIR_TABELLE, AFIR_STATUS)
+        point, = publication.points
+        self.assertEqual(point.ref_id, "point-1")
+        self.assertEqual(point.evse_id, "DE*ABC*E12345")
+        self.assertEqual(point.bnetza_id, "BNA-1")
+        self.assertEqual(point.operator, "EnBW mobility+ AG")
+        # Das Profil schreibt Watt, unsere Datenbank rechnet in Kilowatt.
+        self.assertEqual(point.power_kw, 150.0)
+
+        preis = publication.prices["point-1"]
+        self.assertEqual(preis.price_kwh, 0.37)
+        self.assertEqual(preis.currency, "EUR")
+        # Die Standgebuehr faellt nicht unter den Tisch, nur aus dem Hauptfeld.
+        self.assertIn(("pricePerMinute", 0.1), preis.components)
+
+        (verbunden, _), = afir.priced_points(publication)
+        self.assertEqual(verbunden.ref_id, "point-1")
+
+    def test_the_two_envelopes_are_both_understood(self):
+        """Tabelle und Status kommen in verschiedenen Umschlaegen."""
+        import afir
+
+        # Der Umschlag der Tabelle um den Status gelegt und umgekehrt: es darf
+        # nicht der Dateiname entscheiden, sondern der Inhalt.
+        getauscht = {"payload": AFIR_STATUS["messageContainer"]["payload"][0]}
+        publication = _afir_lesen(
+            {"messageContainer": {"payload": [AFIR_TABELLE["payload"]]}}, getauscht
+        )
+        self.assertEqual(len(publication.points), 1)
+        self.assertEqual(publication.prices["point-1"].price_kwh, 0.37)
+
+    def test_implausible_coordinates_are_thrown_away(self):
+        """Das amtliche Beispiel selbst enthaelt latitude == longitude."""
+        import afir
+        import copy
+
+        self.assertFalse(afir.plausible(50.779594, 50.779594))
+        self.assertFalse(afir.plausible(48.7, 120.0))
+        self.assertTrue(afir.plausible(48.69235, 9.1946))
+
+        kaputt = copy.deepcopy(AFIR_TABELLE)
+        station = (kaputt["payload"]["aegiEnergyInfrastructureTablePublication"]
+                   ["energyInfrastructureTable"][0]["energyInfrastructureSite"][0]
+                   ["energyInfrastructureStation"][0])
+        station["locationReference"]["pointByCoordinates"]["pointCoordinates"] = {
+            "latitude": 50.779594, "longitude": 50.779594
+        }
+        point, = _afir_lesen(kaputt).points
+        # Der Punkt bleibt, aber ohne Koordinaten: er kann noch ueber die
+        # EVSE-Id treffen, nur nicht mehr ueber die Naehe.
+        self.assertIsNone(point.lat)
+        self.assertEqual(point.evse_id, "DE*ABC*E12345")
+
+    def test_a_status_without_any_price_is_no_price(self):
+        import copy
+
+        leer = copy.deepcopy(AFIR_STATUS)
+        (leer["messageContainer"]["payload"][0]["aegiEnergyInfrastructureStatusPublication"]
+         ["energyInfrastructureSiteStatus"][0]["energyInfrastructureStationStatus"][0]
+         ["refillPointStatus"][0]["electricChargingPointStatus"].pop("energyRateUpdate"))
+        self.assertEqual(_afir_lesen(AFIR_TABELLE, leer).prices, {})
+
+
+class PriceMatchTest(unittest.TestCase):
+    """Das Zuordnen von AFIR-Ladepunkten zu unseren OSM-Saeulen."""
+
+    def setUp(self):
+        import prices
+
+        self.prices = prices
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.path = Path(self._directory.name) / "preise.sqlite"
+        self.connection = ingest.connect(self.path)
+
+    def saeule(self, charger_id, lat, lon, operator=None, tags=None):
+        self.connection.execute(
+            "INSERT INTO charger (id, lat, lon, operator, is_enbw, network, is_car,"
+            " power_kw, capacity, fee, tags) VALUES (?, ?, ?, ?, 0, NULL, 1, NULL, NULL, NULL, ?)",
+            (charger_id, lat, lon, operator, json.dumps(tags or {})),
+        )
+        self.connection.commit()
+
+    def punkt(self, ref_id, lat, lon, operator=None, evse=None):
+        import afir
+
+        return afir.ChargingPoint(ref_id=ref_id, evse_id=evse, station_id=None,
+                                  bnetza_id=None, lat=lat, lon=lon, operator=operator,
+                                  power_kw=None)
+
+    def veroeffentlichung(self, punkte, preise=None):
+        import afir
+
+        return afir.Publication(points=list(punkte), prices=dict(preise or {}))
+
+    def preis(self, ref_id, wert):
+        import afir
+
+        return afir.Price(ref_id=ref_id, price_kwh=wert, currency="EUR",
+                          updated_at="2026-09-08T12:00:00Z", status="available")
+
+    def links(self):
+        return {
+            row["charger_id"]: (row["external_id"], row["method"])
+            for row in self.connection.execute("SELECT * FROM charger_link")
+        }
+
+    def test_operator_names_survive_legal_forms(self):
+        gleich = self.prices.operators_match
+        self.assertTrue(gleich("EnBW", "EnBW mobility+ AG"))
+        self.assertTrue(gleich("EnBW Energie Baden-Württemberg AG", "EnBW mobility+"))
+        self.assertTrue(gleich("Stadtwerke Tübingen GmbH", "Stadtwerke Tübingen"))
+        # Zwei Betreiber, die nur die Rechtsform teilen, sind nicht derselbe.
+        self.assertFalse(gleich("EnBW GmbH", "EWE Go GmbH"))
+        self.assertFalse(gleich("EnBW", None))
+        # "Energie" allein ist Rauschen, sonst passte jedes Stadtwerk auf jedes.
+        self.assertFalse(gleich("Rheinenergie", "Energie Südbayern"))
+
+    def test_evse_id_beats_a_much_closer_neighbour(self):
+        """Die exakte Id schlaegt die Naehe, sonst gewinnt der falsche Nachbar."""
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW", {"ref:EU:EVSE": "DE*ABC*E12345"})
+        publication = self.veroeffentlichung([
+            # Direkt auf der Saeule, aber die falsche Id.
+            self.punkt("nah", 48.6900, 9.1946, "EnBW", evse="DE*XYZ*E99999"),
+            # 20 m weg, aber die richtige Id.
+            self.punkt("richtig", 48.69018, 9.1946, "EnBW", evse="DE*ABC*E12345"),
+        ])
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(self.links()["node/1"], ("richtig", "evse"))
+
+    def test_each_point_is_handed_out_only_once(self):
+        """Der Kern: zwei Saeulen, ein Ladepunkt, eine Verbindung.
+
+        Genau das ging im ersten Entwurf schief. Jede Saeule griff unabhaengig
+        nach dem naechsten Punkt, und weil ein Drittel unserer Saeulen einen
+        Nachbarn unter 25 m hat, schnappten sie sich gegenseitig die Punkte.
+        Gegen eine simulierte Wahrheit waren 19,4 Prozent aller Verbindungen
+        falsch; wechselseitig sind es 10,5, und weil die uebrigen Fehlgriffe
+        Vertauschungen im selben Ladepark beim selben Betreiber sind, stimmen
+        99,8 Prozent der angezeigten Preise.
+        """
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        self.saeule("node/2", 48.69009, 9.1946, "EnBW")   # rund 10 m weiter
+        publication = self.veroeffentlichung(
+            [self.punkt("p1", 48.69002, 9.1946, "EnBW AG")],
+            {"p1": self.preis("p1", 0.39)},
+        )
+        self.prices.update(self.connection, publication, "test")
+
+        verbindungen = self.links()
+        self.assertEqual(len(verbindungen), 1)
+        # Und zwar an die naechste der beiden.
+        self.assertEqual(verbindungen["node/1"][0], "p1")
+        preise = self.connection.execute("SELECT charger_id, price_kwh FROM charger_price").fetchall()
+        self.assertEqual([(row["charger_id"], row["price_kwh"]) for row in preise],
+                         [("node/1", 0.39)])
+
+    def test_a_matching_operator_wins_over_a_nearer_stranger(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        publication = self.veroeffentlichung([
+            self.punkt("fremd", 48.69001, 9.1946, "EWE Go GmbH"),
+            self.punkt("passend", 48.69015, 9.1946, "EnBW mobility+ AG"),
+        ])
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(self.links()["node/1"], ("passend", "operator"))
+
+    def test_without_an_operator_match_the_rule_is_named_and_optional(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        publication = self.veroeffentlichung([self.punkt("p1", 48.69005, 9.1946, "EWE Go")])
+
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(self.links()["node/1"], ("p1", "naehe"))
+
+        # Mit --nur-mit-betreiber faellt genau diese Verbindung weg.
+        self.connection.execute("DELETE FROM charger_link")
+        self.connection.commit()
+        self.prices.update(self.connection, publication, "test", allow_without_operator=False)
+        self.assertEqual(self.links(), {})
+
+    def test_nothing_is_matched_beyond_the_radius(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        # Rund 45 m noerdlich, also weit ausserhalb der 25 m.
+        publication = self.veroeffentlichung([self.punkt("p1", 48.69040, 9.1946, "EnBW")])
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(self.links(), {})
+
+    def test_a_link_does_not_wander_when_the_feed_wobbles(self):
+        """Stabilitaet ist der Grund, warum die Zuordnung ueberhaupt gespeichert wird.
+
+        Zwei Saeulen desselben Betreibers, 10 m auseinander, zwei Punkte
+        dazwischen. Beim zweiten Lauf ruecken die Punkte um wenige Meter, genug
+        um die Reihenfolge zu drehen. Ohne Gedaechtnis tauschten die Preise
+        dabei ueber Nacht die Saeule.
+        """
+        self.saeule("node/1", 48.69000, 9.1946, "EnBW")
+        self.saeule("node/2", 48.69009, 9.1946, "EnBW")
+
+        erst = self.veroeffentlichung(
+            [self.punkt("p1", 48.690005, 9.1946, "EnBW"),
+             self.punkt("p2", 48.690085, 9.1946, "EnBW")],
+            {"p1": self.preis("p1", 0.39), "p2": self.preis("p2", 0.79)},
+        )
+        self.prices.update(self.connection, erst, "test")
+        vorher = self.links()
+        self.assertEqual(len(vorher), 2)
+
+        zweit = self.veroeffentlichung(
+            [self.punkt("p1", 48.690080, 9.1946, "EnBW"),
+             self.punkt("p2", 48.690010, 9.1946, "EnBW")],
+            {"p1": self.preis("p1", 0.39), "p2": self.preis("p2", 0.79)},
+        )
+        self.prices.update(self.connection, zweit, "test")
+        self.assertEqual(self.links(), vorher)
+
+    def test_a_link_to_a_vanished_point_is_replaced(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        self.prices.update(
+            self.connection,
+            self.veroeffentlichung([self.punkt("alt", 48.69005, 9.1946, "EnBW")]),
+            "test",
+        )
+        self.assertEqual(self.links()["node/1"][0], "alt")
+
+        # Der Betreiber hat die Id gewechselt. Die alte Verbindung zeigt ins
+        # Leere und muss der neuen weichen, sonst friert der Preis fuer immer.
+        self.prices.update(
+            self.connection,
+            self.veroeffentlichung([self.punkt("neu", 48.69005, 9.1946, "EnBW")]),
+            "test",
+        )
+        self.assertEqual(self.links()["node/1"][0], "neu")
+
+    def test_stale_links_are_dropped_with_their_prices(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        publication = self.veroeffentlichung(
+            [self.punkt("p1", 48.69005, 9.1946, "EnBW")], {"p1": self.preis("p1", 0.39)}
+        )
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(len(self.links()), 1)
+
+        # So alt, wie sie nach STALE_AFTER_DAYS ohne Bestaetigung waere.
+        alt = (datetime.now(timezone.utc)
+               - timedelta(days=self.prices.STALE_AFTER_DAYS + 1)).isoformat(timespec="seconds")
+        self.connection.execute("UPDATE charger_link SET last_confirmed = ?", (alt,))
+        self.connection.commit()
+        # Ein Lauf ohne diesen Punkt bestaetigt nichts mehr.
+        self.prices.update(self.connection, self.veroeffentlichung([]), "test")
+        self.assertEqual(self.links(), {})
+        self.assertEqual(
+            self.connection.execute("SELECT COUNT(*) n FROM charger_price").fetchone()["n"], 0
+        )
+
+    def test_a_pinned_link_is_never_touched(self):
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        self.prices.update(
+            self.connection,
+            self.veroeffentlichung([self.punkt("hand", 48.69005, 9.1946, "EnBW")]),
+            "test",
+        )
+        self.connection.execute("UPDATE charger_link SET pinned = 1")
+        self.connection.commit()
+        # Ein Feed ohne diesen Punkt, dafuer mit einem naeheren: die von Hand
+        # gesetzte Verbindung bleibt trotzdem stehen.
+        self.prices.update(
+            self.connection,
+            self.veroeffentlichung([self.punkt("anders", 48.69000, 9.1946, "EnBW")]),
+            "test",
+        )
+        self.assertEqual(self.links()["node/1"][0], "hand")
+
+
+    def test_links_survive_a_fresh_ingest(self):
+        """Der naechtliche Lauf baut eine leere Datenbank. Ohne Uebernahme
+        waere die gespeicherte Zuordnung jeden Morgen weg, und damit genau
+        die Stabilitaet, wegen der sie gespeichert wird."""
+        self.saeule("node/1", 48.6900, 9.1946, "EnBW")
+        self.saeule("node/2", 48.7000, 9.2000, "EnBW")
+        publication = self.veroeffentlichung(
+            [self.punkt("p1", 48.69005, 9.1946, "EnBW"),
+             self.punkt("p2", 48.70005, 9.2000, "EnBW")],
+            {"p1": self.preis("p1", 0.39), "p2": self.preis("p2", 0.59)},
+        )
+        self.prices.update(self.connection, publication, "test")
+        self.assertEqual(len(self.links()), 2)
+
+        # Wie im Workflow: frische Datenbank, node/2 ist aus OSM verschwunden.
+        frisch_pfad = Path(self._directory.name) / "fresh.sqlite"
+        frisch = ingest.connect(frisch_pfad)
+        frisch.execute(
+            "INSERT INTO charger (id, lat, lon, operator, is_enbw, network, is_car,"
+            " power_kw, capacity, fee, tags)"
+            " VALUES ('node/1', 48.6900, 9.1946, 'EnBW', 1, 'enbw', 1, NULL, NULL, NULL, '{}')"
+        )
+        frisch.commit()
+
+        uebernommen = self.prices.carry_over(self.path, frisch)
+        self.assertEqual(uebernommen["verbindungen"], 1)
+        self.assertEqual(uebernommen["preise"], 1)
+        # Nur die Saeule, die es noch gibt.
+        self.assertEqual(
+            [row["charger_id"] for row in frisch.execute("SELECT charger_id FROM charger_link")],
+            ["node/1"],
+        )
+        self.assertEqual(
+            frisch.execute("SELECT price_kwh FROM charger_price").fetchone()["price_kwh"], 0.39
+        )
+
+    def test_carrying_over_from_a_database_without_the_tables_is_harmless(self):
+        """Der erste Lauf nach dem Einbau findet eine alte Datenbank ohne diese Tabellen."""
+        alt_pfad = Path(self._directory.name) / "alt.sqlite"
+        alt = sqlite3.connect(alt_pfad)
+        alt.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+        alt.commit()
+        alt.close()
+        self.assertEqual(self.prices.carry_over(alt_pfad, self.connection),
+                         {"verbindungen": 0, "preise": 0})
+        # Und eine Datenbank, die es gar nicht gibt, ist auch kein Fehler.
+        self.assertEqual(
+            self.prices.carry_over(Path(self._directory.name) / "gibtsnicht.sqlite", self.connection),
+            {"verbindungen": 0, "preise": 0},
+        )
+
+
+class PriceQueryTest(unittest.TestCase):
+    """Preise auf dem Lesepfad: Filter, Nutzlast und statischer Export."""
+
+    def setUp(self):
+        import prices
+
+        self._directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self._directory.cleanup)
+        self.path = Path(self._directory.name) / "preise.sqlite"
+        connection = ingest.connect(self.path)
+        connection.execute(
+            "INSERT INTO store (id, brand, amenity, vegan, vegan_only, lat, lon, name,"
+            " address, opening_hours, tags) VALUES"
+            " ('node/1', 'bk', 'fast_food', 1, 0, 48.6919, 9.1946, 'Burger King', NULL, NULL, '{}')"
+        )
+        # Die guenstige Saeule steht hinter der teuren. Ohne Preisfilter ist
+        # die teure die naechste, mit Preisfilter muss die guenstige kommen.
+        connection.executemany(
+            "INSERT INTO charger (id, lat, lon, operator, is_enbw, network, is_car,"
+            " power_kw, capacity, fee, tags) VALUES (?, ?, ?, 'EnBW', 1, 'enbw', 1, 150.0,"
+            " NULL, NULL, '{}')",
+            [("node/10", 48.69195, 9.1946), ("node/11", 48.69205, 9.1946)],
+        )
+        connection.commit()
+        ingest.build_pairs(connection, 1000)
+        ingest.build_index(connection)
+        connection.executemany(
+            "INSERT INTO charger_price (charger_id, price_kwh, currency, components,"
+            " price_updated_at, fetched_at) VALUES (?, ?, 'EUR', NULL, ?, ?)",
+            [("node/10", 0.79, "2026-09-08T12:00:00Z", "2026-09-08T12:05:00+00:00"),
+             ("node/11", 0.39, "2026-09-08T12:00:00Z", "2026-09-08T12:05:00+00:00")],
+        )
+        connection.commit()
+        connection.close()
+        self.database = SpotDatabase(self.path)
+
+    def test_price_travels_with_the_charger(self):
+        spot, = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, kinds=["bk"]
+        )
+        naechste = spot["chargers"][0]
+        self.assertEqual(naechste["id"], "node/10")
+        self.assertEqual(naechste["priceKwh"], 0.79)
+        self.assertEqual(naechste["priceCurrency"], "EUR")
+        self.assertEqual(naechste["priceUpdatedAt"], "2026-09-08T12:00:00Z")
+
+    def test_price_filter_picks_the_cheap_one_behind_the_expensive_one(self):
+        spot, = self.database.spots_near(
+            *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, kinds=["bk"], max_price_kwh=0.50
+        )
+        self.assertEqual([c["id"] for c in spot["chargers"]], ["node/11"])
+
+    def test_a_charger_without_a_price_is_not_cheap(self):
+        """Kein bekannter Preis darf nie als guenstig durchgehen."""
+        connection = sqlite3.connect(self.path)
+        connection.execute("DELETE FROM charger_price WHERE charger_id = 'node/11'")
+        connection.commit()
+        connection.close()
+        self.assertEqual(
+            SpotDatabase(self.path).spots_near(
+                *BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, kinds=["bk"], max_price_kwh=0.50
+            ),
+            [],
+        )
+
+    def test_meta_says_how_many_prices_and_how_old(self):
+        meta = self.database.meta()
+        self.assertEqual(meta["pricedChargers"], 2)
+        self.assertEqual(meta["pricesFetchedAt"], "2026-09-08T12:05:00+00:00")
+
+    def test_export_carries_prices_and_their_age(self):
+        import export_static
+
+        with tempfile.TemporaryDirectory() as directory:
+            payload = export_static.export(self.path, Path(directory) / "spots.json")
+        self.assertEqual(payload["meta"]["pricedChargers"], 2)
+        self.assertEqual(payload["meta"]["pricesFetchedAt"], "2026-09-08T12:05:00+00:00")
+        spot, = payload["spots"]
+        self.assertEqual({c["id"]: c["priceKwh"] for c in spot["chargers"]},
+                         {"node/10": 0.79, "node/11": 0.39})
+
+    def test_a_database_without_prices_still_works(self):
+        """Ohne AFIR-Abonnement steht kein einziger Preis drin. Das ist der Normalfall."""
+        import export_static
+
+        connection = sqlite3.connect(self.path)
+        connection.execute("DELETE FROM charger_price")
+        connection.commit()
+        connection.close()
+
+        database = SpotDatabase(self.path)
+        self.assertEqual(database.meta()["pricedChargers"], 0)
+        self.assertNotIn("pricesFetchedAt", database.meta())
+        spot, = database.spots_near(*BK_ECHTERDINGEN, radius_m=1_000, gap_m=300, kinds=["bk"])
+        # Kein Feld statt null: 24558 mal "priceKwh":null waere Ballast.
+        self.assertNotIn("priceKwh", spot["chargers"][0])
+        with tempfile.TemporaryDirectory() as directory:
+            payload = export_static.export(self.path, Path(directory) / "spots.json")
+        self.assertEqual(payload["meta"]["pricedChargers"], 0)
 
 
 if __name__ == "__main__":
