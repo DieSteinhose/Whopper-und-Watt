@@ -71,6 +71,7 @@ def _chargers_by_store(connection: sqlite3.Connection) -> dict[str, list[dict]]:
         "SELECT p.store_id, p.gap_m, c.id, c.lat, c.lon, c.operator, c.network,"
         " c.power_kw, c.capacity, c.fee"
         " FROM pair p JOIN charger c ON c.id = p.charger_id"
+        " WHERE c.is_car = 1"
         " ORDER BY p.store_id, p.gap_m"
     )
     for row in connection.execute(query):

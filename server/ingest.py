@@ -437,7 +437,7 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
     for element in payload.get("elements", []):
         point = element_point(element)
         tags = element.get("tags") or {}
-        if not point or not is_car_charger(tags):
+        if not point:
             continue
         rows.append(
             (
@@ -447,6 +447,7 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
                 tags.get("operator") or tags.get("network") or tags.get("name"),
                 1 if is_enbw(tags) else 0,
                 network_of(tags),
+                1 if is_car_charger(tags) else 0,
                 max_power_kw(tags),
                 tags.get("capacity"),
                 tags.get("fee"),
@@ -455,8 +456,8 @@ def store_chargers(connection: sqlite3.Connection, payload: dict) -> int:
         )
     connection.executemany(
         "INSERT OR REPLACE INTO charger"
-        " (id, lat, lon, operator, is_enbw, network, power_kw, capacity, fee, tags)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " (id, lat, lon, operator, is_enbw, network, is_car, power_kw, capacity, fee, tags)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
     return len(rows)
@@ -492,27 +493,6 @@ def build_pairs(connection: sqlite3.Connection, gap_m: float) -> int:
     connection.commit()
     print(f"  {len(rows)} Paare bis {gap_m:.0f} m", flush=True)
     return len(rows)
-
-
-def drop_non_car_chargers(connection: sqlite3.Connection) -> int:
-    """Wirft Fahrrad-Ladestationen aus einem bestehenden Bestand.
-
-    Neue Laeufe filtern schon beim Einlesen. Diese Funktion raeumt auf, was in
-    einer aelteren Datenbank oder im Actions-Cache noch liegt, ohne dass dafuer
-    neu abgefragt werden muesste.
-    """
-    weg = [
-        row["id"]
-        for row in connection.execute("SELECT id, tags FROM charger")
-        if not is_car_charger(json.loads(row["tags"] or "{}"))
-    ]
-    if not weg:
-        return 0
-    connection.executemany("DELETE FROM charger WHERE id = ?", [(item,) for item in weg])
-    connection.executemany("DELETE FROM pair WHERE charger_id = ?", [(item,) for item in weg])
-    connection.commit()
-    print(f"  {len(weg)} Ladestationen ohne Auto verworfen", flush=True)
-    return len(weg)
 
 
 def prune_chargers(connection: sqlite3.Connection) -> int:
@@ -627,7 +607,6 @@ def main() -> int:
         )
 
     print("Paare berechnen", flush=True)
-    drop_non_car_chargers(connection)
     pairs = build_pairs(connection, arguments.gap)
     if not arguments.keep_all_chargers:
         prune_chargers(connection)

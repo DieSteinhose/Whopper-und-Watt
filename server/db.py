@@ -184,7 +184,7 @@ class SpotDatabase:
         # ROUND() laesst den Index auf pair(store_id, gap_m) in Ruhe.
         query = (
             "SELECT c.*, p.gap_m FROM pair p JOIN charger c ON c.id = p.charger_id"
-            " WHERE p.store_id = ? AND p.gap_m < ? + 0.5"
+            " WHERE p.store_id = ? AND p.gap_m < ? + 0.5 AND c.is_car = 1"
         )
         parameters: list = [store_id, gap_m]
         wanted = [key for key in dict.fromkeys(networks) if key in NETWORKS]

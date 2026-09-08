@@ -19,7 +19,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from geo import network_of
+from geo import is_car_charger, network_of
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS charger (
     operator TEXT,
     is_enbw INTEGER NOT NULL,
     network TEXT,
+    is_car INTEGER NOT NULL DEFAULT 1,
     power_kw REAL,
     capacity TEXT,
     fee TEXT,
@@ -75,7 +76,7 @@ ADDED_STORE_COLUMNS = {
     "vegan": "INTEGER NOT NULL DEFAULT 0",
     "vegan_only": "INTEGER NOT NULL DEFAULT 0",
 }
-ADDED_CHARGER_COLUMNS = {"network": "TEXT"}
+ADDED_CHARGER_COLUMNS = {"network": "TEXT", "is_car": "INTEGER NOT NULL DEFAULT 1"}
 
 # Erst nach der Migration, denn ein Index auf einer Spalte, die es in einer
 # aelteren Datenbank noch nicht gibt, laesst sich nicht anlegen.
@@ -124,7 +125,30 @@ def migrate(connection: sqlite3.Connection) -> list[str]:
         connection.commit()
     if "charger.network" in added:
         backfill_networks(connection)
+    if "charger.is_car" in added:
+        backfill_car_flag(connection)
     return added
+
+
+def backfill_car_flag(connection: sqlite3.Connection) -> int:
+    """Fahrrad-Ladestationen aus den gespeicherten Tags markieren.
+
+    Als Spalte und nicht als Loeschung beim Ingest, und das ist die Lehre aus
+    dem Fall davor: der Ingest laeuft bei einem Commit-Lauf gar nicht, weil die
+    Datenbank aus dem Actions-Cache kommt. Eine Regel, die nur auf dem
+    Schreibpfad greift, erreicht den Datenbestand dann nie. Als Spalte mit
+    Nachtrag beim Oeffnen heilt sich jede Datenbank selbst, und wenn sich die
+    Regel spaeter aendert, kostet das keinen neuen Overpass-Lauf.
+    """
+    rows = [
+        (1 if is_car_charger(json.loads(row["tags"] or "{}")) else 0, row["id"])
+        for row in connection.execute("SELECT id, tags FROM charger")
+    ]
+    connection.executemany("UPDATE charger SET is_car = ? WHERE id = ?", rows)
+    connection.commit()
+    weg = sum(1 for flag, _ in rows if not flag)
+    print(f"  {weg} von {len(rows)} Saeulen als Nicht-Auto markiert", flush=True)
+    return weg
 
 
 def backfill_networks(connection: sqlite3.Connection) -> int:

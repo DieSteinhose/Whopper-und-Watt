@@ -82,13 +82,22 @@ Die Wikidata-Ids sind am Datenbestand geprüft, nicht aus dem Kopf. Dabei kam he
 bisherige EnBW-Anker `Q321820` deutschlandweit **null mal** vorkommt und damit wirkungslos war;
 gerettet hat das nur die Namenssuche. Richtig ist `Q644304`, an 919 Säulen.
 
-**Fahrrad-Ladestationen zaehlen nicht mit.** `amenity=charging_station` steht in OSM auch an
+**Fahrrad-Ladestationen zählen nicht mit.** `amenity=charging_station` steht in OSM auch an
 E-Bike-Ladepunkten. Gemessen waren 898 von 25.456 Säulen im Bestand keine Autoladesäulen, gut
 drei Prozent, und sie steckten in 4.811 Paaren: die App zeigte E-Bike-Ladepunkte als Ladesäule
 neben dem Burger King. Aussortiert wird über `motorcar=no` oder einen Namen, der vom Fahrrad
 spricht. Über `bicycle=yes` zu gehen wäre verlockend und falsch, davon tragen 269 trotzdem
 Autosteckertypen; und `motorcar=yes` zu verlangen ginge gar nicht, das Tag fehlt an 14.652 von
 25.456 Säulen.
+
+Die Regel steckt als Spalte `charger.is_car` im Datenmodell, nicht als Löschung beim Ingest.
+Der Grund ist derselbe wie beim Schema: bei einem Commit-Lauf kommt die Datenbank aus dem
+Actions-Cache und der Ingest läuft gar nicht. Eine Regel, die nur auf dem Schreibpfad greift,
+erreicht den Datenbestand dann nie. Als Spalte mit Nachtrag beim Öffnen heilt sich jede
+Datenbank selbst, und eine spätere Änderung der Regel kostet keinen neuen Overpass-Lauf.
+
+**Preise gibt es in der App nicht**, siehe den Abschnitt weiter unten. Die Karte zeigt zur
+Säule nur, was in OSM steht: Leistung, Anzahl Ladepunkte und ob `fee` auf ja oder nein steht.
 
 **Die Leistungsangabe fehlt oft.** Von 25.456 Säulen im Bestand haben 9.188 überhaupt eine
 Leistung in OSM, also gut ein Drittel. "ab 50 kW" blendet alles ohne Angabe aus, und das steht

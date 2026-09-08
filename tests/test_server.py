@@ -197,8 +197,8 @@ class DatabaseTest(unittest.TestCase):
         # Saeule 1: EnBW, 50 m neben Filiale 1. Saeule 2: fremd, 60 m neben Filiale 2.
         connection.executemany(
             "INSERT INTO charger"
-            " (id, lat, lon, operator, is_enbw, network, power_kw, capacity, fee, tags)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{}')",
+            " (id, lat, lon, operator, is_enbw, network, is_car, power_kw, capacity, fee, tags)"
+            " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, '{}')",
             [
                 ("node/10", 48.69235, 9.1946, "EnBW", 1, "enbw", 150.0, "4", "yes"),
                 ("node/11", 48.77634, 9.1829, "IONITY", 0, None, 350.0, "6", "yes"),
@@ -615,8 +615,17 @@ class MigrationTest(unittest.TestCase):
             " VALUES ('node/10', 48.69235, 9.1946, 'EnBW', 1, 150.0, '4', 'yes',"
             " '{\"operator\": \"EnBW\"}')"
         )
+        # Eine Fahrrad-Ladestation, naeher dran als die echte Saeule. In einem
+        # Bestand aus dem Actions-Cache steckt genau so etwas: der Ingest, der
+        # sie aussortiert haette, laeuft bei einem Commit-Lauf gar nicht.
         connection.execute(
-            "INSERT INTO pair (store_id, charger_id, gap_m) VALUES ('node/1', 'node/10', 50.0)"
+            "INSERT INTO charger (id, lat, lon, operator, is_enbw, power_kw, capacity, fee, tags)"
+            " VALUES ('node/11', 48.69200, 9.1946, 'bike-energy', 0, NULL, NULL, NULL,"
+            " '{\"motorcar\": \"no\", \"name\": \"E-Bike Ladestation\"}')"
+        )
+        connection.executemany(
+            "INSERT INTO pair (store_id, charger_id, gap_m) VALUES (?, ?, ?)",
+            [("node/1", "node/10", 50.0), ("node/1", "node/11", 10.0)],
         )
         connection.execute(
             "INSERT INTO store_rtree (rowid, min_lat, max_lat, min_lon, max_lon)"
@@ -646,6 +655,8 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual([spot["id"] for spot in spots], ["node/1"])
             # Das Netz wurde aus den gespeicherten Tags nachgetragen.
             self.assertEqual(spots[0]["chargers"][0]["network"], "enbw")
+            # Und die Fahrrad-Ladestation ist draussen, obwohl sie naeher liegt.
+            self.assertEqual([c["id"] for c in spots[0]["chargers"]], ["node/10"])
 
         # Der Weg des statischen Exports.
         with tempfile.TemporaryDirectory() as directory:
@@ -653,6 +664,7 @@ class MigrationTest(unittest.TestCase):
             payload = export_static.export(path, Path(directory) / "spots.json")
             self.assertEqual(len(payload["spots"]), 1)
             self.assertEqual(payload["spots"][0]["chargers"][0]["network"], "enbw")
+            self.assertEqual([c["id"] for c in payload["spots"][0]["chargers"]], ["node/10"])
 
         # Und der schreibende Weg des Ingests.
         with tempfile.TemporaryDirectory() as directory:
@@ -660,6 +672,9 @@ class MigrationTest(unittest.TestCase):
             connection = ingest.connect(path)
             spalten = {row["name"] for row in connection.execute("PRAGMA table_info(charger)")}
             self.assertIn("network", spalten)
+            self.assertIn("is_car", spalten)
+            flags = dict(connection.execute("SELECT id, is_car FROM charger"))
+            self.assertEqual(flags, {"node/10": 1, "node/11": 0})
             connection.close()
 
     def test_schema_and_migration_stay_in_step(self):
